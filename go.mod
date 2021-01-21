@@ -19,7 +19,7 @@ require (
 	github.com/spf13/pflag v1.0.5
 	go.mozilla.org/gopgagent v0.0.0-20170926210634-4d7ea76ff71a
 	go.mozilla.org/sops/v3 v3.6.1
-	golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9
+	golang.org/x/crypto v0.0.0-20201208171446-5f87f3452ae9
 	golang.org/x/net v0.0.0-20200707034311-ab3426394381
 	google.golang.org/grpc v1.27.0
 	k8s.io/api v0.19.4
@@ -31,3 +31,5 @@ require (
 	sigs.k8s.io/kustomize/api v0.7.1
 	sigs.k8s.io/yaml v1.2.0
 )
+
+replace sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.6.6-0.20210121175754-c9f1c06f7254
