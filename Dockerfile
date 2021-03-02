@@ -1,17 +1,18 @@
+# go mod download cache stage
+
 FROM --platform=$BUILDPLATFORM golang:1.15-alpine as gomod
 
 WORKDIR /workspace
 
-# copy api submodule
-COPY api/ api/
-
-# copy modules manifests
+# copy go modules manifests
+COPY ./api/go.mod ./api/go.sum ./api/
 COPY go.mod go.sum ./
 
-# cache modules
+# download dependencies
 RUN go mod download
 
 # ------------------------------------------------------------------------------
+# go crossbuild stage
 
 FROM --platform=$BUILDPLATFORM golang:1.15-alpine as builder
 
@@ -26,14 +27,17 @@ COPY . .
 
 # build
 RUN CGO_ENABLED=0 \
-    GOOS=$(echo "$TARGETPLATFORM" | cut -d '/' -f1 ) \
-    GOARCH=$(echo "$TARGETPLATFORM" | cut -d '/' -f2 ) \
-    GOARM=$(echo "$TARGETPLATFORM" | cut -d '/' -f3 | sed "s/^v//") \
-    go build -a -ldflags "-w -s" -o kustomize-controller main.go
+GOOS=$(echo "$TARGETPLATFORM" | cut -d '/' -f1 ) \
+GOARCH=$(echo "$TARGETPLATFORM" | cut -d '/' -f2 ) \
+GOARM=$(echo "$TARGETPLATFORM" | cut -d '/' -f3 | sed "s/^v//") \
+go build -a -trimpath -o kustomize-controller main.go
 
 # ------------------------------------------------------------------------------
+# Final images build stage
 
 FROM --platform=$TARGETPLATFORM alpine:3.13
+
+ARG TARGETPLATFORM
 
 LABEL org.opencontainers.image.source="https://github.com/fluxcd/kustomize-controller"
 
