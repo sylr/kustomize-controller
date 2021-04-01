@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,6 +37,7 @@ import (
 	"github.com/fluxcd/pkg/untar"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta1"
 	"github.com/go-logr/logr"
+	"github.com/hashicorp/go-retryablehttp"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -68,6 +70,7 @@ import (
 // KustomizationReconciler reconciles a Kustomization object
 type KustomizationReconciler struct {
 	client.Client
+	httpClient            *retryablehttp.Client
 	requeueDependency     time.Duration
 	Scheme                *runtime.Scheme
 	EventRecorder         kuberecorder.EventRecorder
@@ -78,6 +81,7 @@ type KustomizationReconciler struct {
 
 type KustomizationReconcilerOptions struct {
 	MaxConcurrentReconciles   int
+	HTTPRetry                 int
 	DependencyRequeueInterval time.Duration
 }
 
@@ -95,6 +99,15 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 	}
 
 	r.requeueDependency = opts.DependencyRequeueInterval
+
+	// Configure the retryable http client used for fetching artifacts.
+	// By default it retries 10 times within a 3.5 minutes window.
+	httpClient := retryablehttp.NewClient()
+	httpClient.RetryWaitMin = 5 * time.Second
+	httpClient.RetryWaitMax = 30 * time.Second
+	httpClient.RetryMax = opts.HTTPRetry
+	httpClient.Logger = nil
+	r.httpClient = httpClient
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kustomizev1.Kustomization{}, builder.WithPredicates(
@@ -122,6 +135,9 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.Get(ctx, req.NamespacedName, &kustomization); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// Record suspended status metric
+	defer r.recordSuspension(ctx, kustomization)
 
 	// Add our finalizer if it does not exist
 	if !controllerutil.ContainsFinalizer(&kustomization, kustomizev1.KustomizationFinalizer) {
@@ -208,7 +224,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// set the reconciliation status to progressing
 	kustomization = kustomizev1.KustomizationProgressing(kustomization)
 	if err := r.patchStatus(ctx, req, kustomization.Status); err != nil {
-		(logr.FromContext(ctx)).Error(err, "unable to update status to progressing")
+		log.Error(err, "unable to update status to progressing")
 		return ctrl.Result{Requeue: true}, err
 	}
 	r.recordReadiness(ctx, kustomization)
@@ -268,7 +284,7 @@ func (r *KustomizationReconciler) reconcile(
 	defer os.RemoveAll(tmpDir)
 
 	// download artifact and extract files
-	err = r.download(kustomization, source.GetArtifact().URL, tmpDir)
+	err = r.download(source.GetArtifact().URL, tmpDir)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
 			kustomization,
@@ -410,43 +426,35 @@ func (r *KustomizationReconciler) checkDependencies(kustomization kustomizev1.Ku
 	return nil
 }
 
-func (r *KustomizationReconciler) download(kustomization kustomizev1.Kustomization, url string, tmpDir string) error {
-	timeout := kustomization.GetTimeout() + (time.Second * 1)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
+func (r *KustomizationReconciler) download(artifactURL string, tmpDir string) error {
 	if hostname := os.Getenv("SOURCE_CONTROLLER_LOCALHOST"); hostname != "" {
-		namespace := kustomization.GetNamespace()
-		if kustomization.Spec.SourceRef.Namespace != "" {
-			namespace = kustomization.Spec.SourceRef.Namespace
+		u, err := url.Parse(artifactURL)
+		if err != nil {
+			return err
 		}
-		url = fmt.Sprintf("http://%s/%s/%s/%s/latest.tar.gz",
-			hostname,
-			strings.ToLower(kustomization.Spec.SourceRef.Kind),
-			namespace,
-			kustomization.Spec.SourceRef.Name)
+		u.Host = hostname
+		artifactURL = u.String()
 	}
 
-	// download the tarball
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := retryablehttp.NewRequest(http.MethodGet, artifactURL, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create HTTP request for %s, error: %w", url, err)
+		return fmt.Errorf("failed to create a new request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req.WithContext(ctx))
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to download artifact from %s, error: %w", url, err)
+		return fmt.Errorf("failed to download artifact, error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// check response
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("faild to download artifact from %s, status: %s", url, resp.Status)
+		return fmt.Errorf("failed to download artifact from %s, status: %s", artifactURL, resp.Status)
 	}
 
 	// extract
 	if _, err = untar.Untar(resp.Body, tmpDir); err != nil {
-		return fmt.Errorf("faild to untar artifact, error: %w", err)
+		return fmt.Errorf("failed to untar artifact, error: %w", err)
 	}
 
 	return nil
@@ -567,6 +575,7 @@ func (r *KustomizationReconciler) validate(ctx context.Context, kustomization ku
 		return nil
 	}
 
+	log := logr.FromContext(ctx)
 	timeout := kustomization.GetTimeout() + (time.Second * 1)
 	applyCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -575,7 +584,7 @@ func (r *KustomizationReconciler) validate(ctx context.Context, kustomization ku
 	if validation == "server" && kustomization.Spec.Force {
 		// Use client-side validation with force
 		validation = "client"
-		(logr.FromContext(ctx)).Info(fmt.Sprintf("Server-side validation is configured, falling-back to client-side validation since 'force' is enabled"))
+		log.Info(fmt.Sprintf("Server-side validation is configured, falling-back to client-side validation since 'force' is enabled"))
 	}
 
 	cmd := fmt.Sprintf("cd %s && kubectl apply -f %s.yaml --timeout=%s --dry-run=%s --cache-dir=/tmp --force=%t",
@@ -611,6 +620,7 @@ func (r *KustomizationReconciler) validate(ctx context.Context, kustomization ku
 }
 
 func (r *KustomizationReconciler) apply(ctx context.Context, kustomization kustomizev1.Kustomization, imp *KustomizeImpersonation, dirPath string) (string, error) {
+	log := logr.FromContext(ctx)
 	start := time.Now()
 	timeout := kustomization.GetTimeout() + (time.Second * 1)
 	applyCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -653,7 +663,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context, kustomization kusto
 	}
 
 	resources := parseApplyOutput(output)
-	(logr.FromContext(ctx)).Info(
+	log.Info(
 		fmt.Sprintf("Kustomization applied in %s",
 			time.Now().Sub(start).String()),
 		"output", resources,
@@ -669,12 +679,13 @@ func (r *KustomizationReconciler) apply(ctx context.Context, kustomization kusto
 }
 
 func (r *KustomizationReconciler) applyWithRetry(ctx context.Context, kustomization kustomizev1.Kustomization, imp *KustomizeImpersonation, revision, dirPath string, delay time.Duration) (string, error) {
+	log := logr.FromContext(ctx)
 	changeSet, err := r.apply(ctx, kustomization, imp, dirPath)
 	if err != nil {
 		// retry apply due to CRD/CR race
 		if strings.Contains(err.Error(), "could not find the requested resource") ||
 			strings.Contains(err.Error(), "no matches for kind") {
-			(logr.FromContext(ctx)).Info("retrying apply", "error", err.Error())
+			log.Info("retrying apply", "error", err.Error())
 			time.Sleep(delay)
 			if changeSet, err := r.apply(ctx, kustomization, imp, dirPath); err != nil {
 				return "", err
@@ -702,6 +713,7 @@ func (r *KustomizationReconciler) prune(ctx context.Context, kubeClient client.C
 		return nil
 	}
 
+	log := logr.FromContext(ctx)
 	gc := NewGarbageCollector(kubeClient, *kustomization.Status.Snapshot, newChecksum, logr.FromContext(ctx))
 
 	if output, ok := gc.Prune(kustomization.GetTimeout(),
@@ -711,7 +723,7 @@ func (r *KustomizationReconciler) prune(ctx context.Context, kubeClient client.C
 		return fmt.Errorf("garbage collection failed: %s", output)
 	} else {
 		if output != "" {
-			(logr.FromContext(ctx)).Info(fmt.Sprintf("garbage collection completed: %s", output))
+			log.Info(fmt.Sprintf("garbage collection completed: %s", output))
 			r.event(ctx, kustomization, newChecksum, events.EventSeverityInfo, output, nil)
 		}
 	}
@@ -739,13 +751,14 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context, statusPoller 
 }
 
 func (r *KustomizationReconciler) reconcileDelete(ctx context.Context, kustomization kustomizev1.Kustomization) (ctrl.Result, error) {
+	log := logr.FromContext(ctx)
 	if kustomization.Spec.Prune && !kustomization.Spec.Suspend {
 		// create any necessary kube-clients
 		imp := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, "")
 		client, _, err := imp.GetClient(ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to build kube client for Kustomization: %w", err)
-			(logr.FromContext(ctx)).Error(err, "Unable to prune for finalizer")
+			log.Error(err, "Unable to prune for finalizer")
 			return ctrl.Result{}, err
 		}
 		if err := r.prune(ctx, client, kustomization, ""); err != nil {
@@ -769,13 +782,11 @@ func (r *KustomizationReconciler) reconcileDelete(ctx context.Context, kustomiza
 }
 
 func (r *KustomizationReconciler) event(ctx context.Context, kustomization kustomizev1.Kustomization, revision, severity, msg string, metadata map[string]string) {
+	log := logr.FromContext(ctx)
 	r.EventRecorder.Event(&kustomization, "Normal", severity, msg)
 	objRef, err := reference.GetReference(r.Scheme, &kustomization)
 	if err != nil {
-		(logr.FromContext(ctx)).WithValues(
-			strings.ToLower(kustomization.Kind),
-			fmt.Sprintf("%s/%s", kustomization.GetNamespace(), kustomization.GetName()),
-		).Error(err, "unable to send event")
+		log.Error(err, "unable to send event")
 		return
 	}
 
@@ -793,7 +804,7 @@ func (r *KustomizationReconciler) event(ctx context.Context, kustomization kusto
 		}
 
 		if err := r.ExternalEventRecorder.Eventf(*objRef, metadata, severity, reason, msg); err != nil {
-			(logr.FromContext(ctx)).Error(err, "unable to send event")
+			log.Error(err, "unable to send event")
 			return
 		}
 	}
@@ -803,10 +814,11 @@ func (r *KustomizationReconciler) recordReadiness(ctx context.Context, kustomiza
 	if r.MetricsRecorder == nil {
 		return
 	}
+	log := logr.FromContext(ctx)
 
 	objRef, err := reference.GetReference(r.Scheme, &kustomization)
 	if err != nil {
-		(logr.FromContext(ctx)).Error(err, "unable to record readiness metric")
+		log.Error(err, "unable to record readiness metric")
 		return
 	}
 	if rc := apimeta.FindStatusCondition(kustomization.Status.Conditions, meta.ReadyCondition); rc != nil {
@@ -816,6 +828,25 @@ func (r *KustomizationReconciler) recordReadiness(ctx context.Context, kustomiza
 			Type:   meta.ReadyCondition,
 			Status: metav1.ConditionUnknown,
 		}, !kustomization.DeletionTimestamp.IsZero())
+	}
+}
+
+func (r *KustomizationReconciler) recordSuspension(ctx context.Context, kustomization kustomizev1.Kustomization) {
+	if r.MetricsRecorder == nil {
+		return
+	}
+	log := logr.FromContext(ctx)
+
+	objRef, err := reference.GetReference(r.Scheme, &kustomization)
+	if err != nil {
+		log.Error(err, "unable to record suspended metric")
+		return
+	}
+
+	if !kustomization.DeletionTimestamp.IsZero() {
+		r.MetricsRecorder.RecordSuspend(*objRef, false)
+	} else {
+		r.MetricsRecorder.RecordSuspend(*objRef, kustomization.Spec.Suspend)
 	}
 }
 

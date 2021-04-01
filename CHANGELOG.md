@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.10.0
+
+**Release date:** 2021-03-26
+
+This is the tenth MINOR prerelease.
+
+This prerelease comes with a breaking change to the leader election ID
+from `305740c0.fluxcd.io` to `source-controller-leader-election`
+to be more descriptive. This change should not have an impact on most
+installations, as the default replica count is `1`. If you are running
+a setup with multiple replicas, it is however advised to scale down
+before upgrading.
+
+Improvements:
+* Set leader election deadline to 30s
+  [#303](https://github.com/fluxcd/kustomize-controller/pull/303)
+* Update SOPS to v3.7.0
+  [#304](https://github.com/fluxcd/kustomize-controller/pull/304)
+
+## 0.9.3
+
+**Release date:** 2021-03-17
+
+This prerelease comes with updates to the runtime packages.
+
+The controller exposes a gauge metric to track the suspended status
+of `Kustomization` objects: `gotk_suspend_status{kind,name,namespace}`.
+
+Improvements:
+* Expose suspended status as Prometheus metric
+  [#299](https://github.com/fluxcd/kustomize-controller/pull/299)
+* Update dependencies
+  [#298](https://github.com/fluxcd/kustomize-controller/pull/298)
+
+## 0.9.2
+
+**Release date:** 2021-03-05
+
+This prerelease comes with improvements to the notification system.
+The controller retries with exponential backoff when fetching artifacts,
+preventing spamming events when source-controller becomes
+unavailable for a short period of time.
+
+Improvements:
+* Retry with exponential backoff when fetching artifacts
+  [#289](https://github.com/fluxcd/kustomize-controller/pull/289)
+* Validate the var names before substitution
+  [#291](https://github.com/fluxcd/kustomize-controller/pull/291)
+
 ## 0.9.1
 
 **Release date:** 2021-02-25
