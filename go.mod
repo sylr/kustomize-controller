@@ -28,7 +28,6 @@ require (
 	golang.org/x/crypto v0.0.0-20210322153248-0c34fe9e7dc2
 	golang.org/x/net v0.0.0-20210326060303-6b1517762897
 	google.golang.org/grpc v1.27.1
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	k8s.io/api v0.20.4
 	k8s.io/apiextensions-apiserver v0.20.4
 	k8s.io/apimachinery v0.20.4
@@ -39,3 +38,5 @@ require (
 	sigs.k8s.io/kustomize/api v0.7.4
 	sigs.k8s.io/yaml v1.2.0
 )
+
+replace sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.6.6-0.20210302084555-8de35139bca2
