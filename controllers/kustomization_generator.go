@@ -25,23 +25,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/kustomize/api/filesys"
-	"sigs.k8s.io/kustomize/api/k8sdeps/kunstruct"
 	"sigs.k8s.io/kustomize/api/konfig"
 	"sigs.k8s.io/kustomize/api/krusty"
+	"sigs.k8s.io/kustomize/api/provider"
 	"sigs.k8s.io/kustomize/api/resmap"
 	kustypes "sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/yaml"
 
-	"github.com/fluxcd/pkg/apis/kustomize"
-
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta1"
+	"github.com/fluxcd/pkg/apis/kustomize"
 )
 
 const (
-	transformerFileName = "kustomization-gc-labels.yaml"
+	transformerFileName           = "kustomization-gc-labels.yaml"
+	transformerAnnotationFileName = "kustomization-gc-annotations.yaml"
 )
 
 type KustomizeGenerator struct {
@@ -67,6 +68,9 @@ func (kg *KustomizeGenerator) WriteFile(ctx context.Context, dirPath string) (st
 	if err := kg.generateLabelTransformer(checksum, dirPath); err != nil {
 		return "", err
 	}
+	if err = kg.generateAnnotationTransformer(checksum, dirPath); err != nil {
+		return "", err
+	}
 
 	data, err := ioutil.ReadFile(kfile)
 	if err != nil {
@@ -85,22 +89,27 @@ func (kg *KustomizeGenerator) WriteFile(ctx context.Context, dirPath string) (st
 	}
 
 	if len(kus.Transformers) == 0 {
-		kus.Transformers = []string{transformerFileName}
+		kus.Transformers = []string{transformerFileName, transformerAnnotationFileName}
 	} else {
-		var exists bool
-		for _, transformer := range kus.Transformers {
-			if transformer == transformerFileName {
-				exists = true
-				break
-			}
-		}
-		if !exists {
+		if !find(kus.Transformers, transformerFileName) {
 			kus.Transformers = append(kus.Transformers, transformerFileName)
 		}
+
+		if !find(kus.Transformers, transformerAnnotationFileName) {
+			kus.Transformers = append(kus.Transformers, transformerAnnotationFileName)
+		}
+
 	}
 
 	if kg.kustomization.Spec.TargetNamespace != "" {
 		kus.Namespace = kg.kustomization.Spec.TargetNamespace
+	}
+
+	for _, m := range kg.kustomization.Spec.Patches {
+		kus.Patches = append(kus.Patches, kustypes.Patch{
+			Patch:  m.Patch,
+			Target: adaptSelector(&m.Target),
+		})
 	}
 
 	for _, m := range kg.kustomization.Spec.PatchesStrategicMerge {
@@ -162,7 +171,8 @@ func (kg *KustomizeGenerator) generateKustomization(dirPath string) error {
 
 	scan := func(base string) ([]string, error) {
 		var paths []string
-		uf := kunstruct.NewKunstructuredFactoryImpl()
+		pvd := provider.NewDefaultDepProvider()
+		rf := pvd.GetResourceFactory()
 		err := fs.Walk(base, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -192,7 +202,7 @@ func (kg *KustomizeGenerator) generateKustomization(dirPath string) error {
 				return err
 			}
 
-			if _, err := uf.SliceFromBytes(fContents); err != nil {
+			if _, err := rf.SliceFromBytes(fContents); err != nil {
 				return fmt.Errorf("failed to decode Kubernetes YAML from %s: %w", path, err)
 			}
 			paths = append(paths, path)
@@ -275,13 +285,52 @@ func (kg *KustomizeGenerator) checksum(ctx context.Context, dirPath string) (str
 	return fmt.Sprintf("%x", sha1.Sum(resources)), nil
 }
 
+func (kg *KustomizeGenerator) generateAnnotationTransformer(checksum, dirPath string) error {
+	var annotations map[string]string
+	// add checksum annotations only if GC is enabled
+	if kg.kustomization.Spec.Prune {
+		annotations = gcAnnotation(checksum)
+	}
+
+	var lt = struct {
+		ApiVersion string `json:"apiVersion" yaml:"apiVersion"`
+		Kind       string `json:"kind" yaml:"kind"`
+		Metadata   struct {
+			Name string `json:"name" yaml:"name"`
+		} `json:"metadata" yaml:"metadata"`
+		Annotations map[string]string    `json:"annotations,omitempty" yaml:"annotations,omitempty"`
+		FieldSpecs  []kustypes.FieldSpec `json:"fieldSpecs,omitempty" yaml:"fieldSpecs,omitempty"`
+	}{
+		ApiVersion: "builtin",
+		Kind:       "AnnotationsTransformer",
+		Metadata: struct {
+			Name string `json:"name" yaml:"name"`
+		}{
+			Name: kg.kustomization.GetName(),
+		},
+		Annotations: annotations,
+		FieldSpecs: []kustypes.FieldSpec{
+			{Path: "metadata/annotations", CreateIfNotPresent: true},
+		},
+	}
+
+	data, err := yaml.Marshal(lt)
+	if err != nil {
+		return err
+	}
+
+	annotationsFile := filepath.Join(dirPath, transformerAnnotationFileName)
+	if err := ioutil.WriteFile(annotationsFile, data, os.ModePerm); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (kg *KustomizeGenerator) generateLabelTransformer(checksum, dirPath string) error {
 	labels := selectorLabels(kg.kustomization.GetName(), kg.kustomization.GetNamespace())
 
-	// add checksum label only if GC is enabled
-	if kg.kustomization.Spec.Prune {
-		labels = gcLabels(kg.kustomization.GetName(), kg.kustomization.GetNamespace(), checksum)
-	}
+	labels = gcLabels(kg.kustomization.GetName(), kg.kustomization.GetNamespace(), checksum)
 
 	var lt = struct {
 		ApiVersion string `json:"apiVersion" yaml:"apiVersion"`
@@ -332,25 +381,37 @@ func adaptSelector(selector *kustomize.Selector) (output *kustypes.Selector) {
 	return
 }
 
+// TODO: remove mutex when kustomize fixes the concurrent map read/write panic
+var kustomizeBuildMutex sync.Mutex
+
 // buildKustomization wraps krusty.MakeKustomizer with the following settings:
-// - disable kyaml due to critical bugs like:
-//	 - https://github.com/kubernetes-sigs/kustomize/issues/3446
-//	 - https://github.com/kubernetes-sigs/kustomize/issues/3480
 // - reorder the resources just before output (Namespaces and Cluster roles/role bindings first, CRDs before CRs, Webhooks last)
 // - load files from outside the kustomization.yaml root
 // - disable plugins except for the builtin ones
-// - prohibit changes to resourceIds, patch name/kind don't overwrite target name/kind
 func buildKustomization(fs filesys.FileSystem, dirPath string) (resmap.ResMap, error) {
+	// temporary workaround for concurrent map read and map write bug
+	// https://github.com/kubernetes-sigs/kustomize/issues/3659
+	kustomizeBuildMutex.Lock()
+	defer kustomizeBuildMutex.Unlock()
+
 	buildOptions := &krusty.Options{
-		UseKyaml:               false,
-		DoLegacyResourceSort:   true,
-		LoadRestrictions:       kustypes.LoadRestrictionsNone,
-		AddManagedbyLabel:      false,
-		DoPrune:                false,
-		PluginConfig:           konfig.DisabledPluginConfig(),
-		AllowResourceIdChanges: false,
+		DoLegacyResourceSort: true,
+		LoadRestrictions:     kustypes.LoadRestrictionsNone,
+		AddManagedbyLabel:    false,
+		DoPrune:              false,
+		PluginConfig:         kustypes.DisabledPluginConfig(),
 	}
 
-	k := krusty.MakeKustomizer(fs, buildOptions)
-	return k.Run(dirPath)
+	k := krusty.MakeKustomizer(buildOptions)
+	return k.Run(fs, dirPath)
+}
+
+func find(source []string, value string) bool {
+	for _, item := range source {
+		if item == value {
+			return true
+		}
+	}
+
+	return false
 }

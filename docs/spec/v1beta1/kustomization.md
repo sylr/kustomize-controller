@@ -364,18 +364,19 @@ but are missing from the current source revision, are removed from cluster autom
 Garbage collection is also performed when a Kustomization object is deleted,
 triggering a removal of all Kubernetes objects previously applied on the cluster.
 
-To keep track of the Kubernetes objects reconciled from a Kustomization, the following labels 
-are injected into the manifests:
+To keep track of the Kubernetes objects reconciled from a Kustomization, the following metadata 
+is injected into the manifests:
 
 ```yaml
 labels:
   kustomize.toolkit.fluxcd.io/name: "<Kustomization name>"
   kustomize.toolkit.fluxcd.io/namespace: "<Kustomization namespace>"
+annotations:
   kustomize.toolkit.fluxcd.io/checksum: "<manifests checksum>"
 ```
 
-The checksum label value is updated if the content of `spec.path` changes.
-When pruning is disabled, the checksum label is omitted. 
+The checksum annotation value is updated if the content of `spec.path` changes.
+When pruning is disabled, the checksum annotation is omitted. 
 
 You can disable pruning for certain resources by either
 labeling or annotating them with:
@@ -598,14 +599,15 @@ The Kustomization has a set of fields to extend and/or override the Kustomize
 patches and namespace on all the Kubernetes objects reconciled by the resource,
 offering support for the following Kustomize directives:
 
-- [namespace](https://kubectl.docs.kubernetes.io/references/kustomize/namespace/)
+- [namespace](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/namespace/)
+- [patches](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/patches/)
 - [patchesStrategicMerge](https://kubectl.docs.kubernetes.io/references/kustomize/patchesstrategicmerge/)
-- [patchesJson6902](https://kubectl.docs.kubernetes.io/references/kustomize/patchesjson6902/)
-- [images](https://kubectl.docs.kubernetes.io/references/kustomize/images/)
+- [patchesJson6902](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/patchesjson6902/)
+- [images](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/images/)
 
 ### Target namespace
 
-To configure the [Kustomize `namespace`](https://kubectl.docs.kubernetes.io/references/kustomize/namespace/)
+To configure the [Kustomize `namespace`](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/namespace/)
 and overwrite the namespace of all the Kubernetes objects reconciled by the `Kustomization`,
 `spec.targetNamespace` can be defined:
 
@@ -622,9 +624,37 @@ spec:
 
 The `targetNamespace` is expected to exist.
 
+### Patches
+
+To add [Kustomize `patches` entries](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/patches/)
+to the configuration, and patch resources using either a [strategic merge](https://kubectl.docs.kubernetes.io/references/kustomize/glossary#patchstrategicmerge) 
+patch or a [JSON](https://kubectl.docs.kubernetes.io/references/kustomize/glossary#patchjson6902) patch,
+`spec.patches` items must contain a `target` selector and a `patch` document.
+The patch can target a single resource or multiple resources
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1beta1
+kind: Kustomization
+metadata:
+  name: podinfo
+  namespace: flux-system
+spec:
+  # ...omitted for brevity
+  patches:
+    - patch: |-
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: not-used
+          labels:
+            app.kubernetes.io/part-of: test-app
+      target:
+        labelSelector: "app=podinfo"
+```
+
 ### Strategic Merge patches
 
-To add [Kustomize `patchesStrategicMerge` entries](https://kubectl.docs.kubernetes.io/references/kustomize/patchesstrategicmerge/)
+To add [Kustomize `patchesStrategicMerge` entries](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/patchesstrategicmerge/)
 to the configuration, `spec.patchesStrategicMerge` can be defined with a list
 of strategic merge patches in YAML format:
 
@@ -649,7 +679,7 @@ spec:
 
 ### JSON 6902 patches
 
-To add [Kustomize `patchesJson6902` entries](https://kubectl.docs.kubernetes.io/references/kustomize/patchesjson6902/)
+To add [Kustomize `patchesJson6902` entries](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/patchesjson6902/)
 to the configuration, and patch resources using the [JSON 6902 standard](https://tools.ietf.org/html/rfc6902),
 `spec.patchesJson6902`, the items must contain a `target` selector and JSON 6902
 `patch` document:
@@ -675,7 +705,7 @@ spec:
 
 ### Images
 
-To add [Kustomize `images` entries](https://kubectl.docs.kubernetes.io/references/kustomize/images/)
+To add [Kustomize `images` entries](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/images/)
 to the configuration, and overwrite the name, tag or digest of container images
 without creating patches, `spec.images` can be defined:
 
