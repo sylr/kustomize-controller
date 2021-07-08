@@ -33,7 +33,7 @@ go build -a -trimpath -o kustomize-controller main.go
 # ------------------------------------------------------------------------------
 # Final images build stage
 
-FROM --platform=$TARGETPLATFORM alpine:3.13
+FROM --platform=$TARGETPLATFORM alpine:3.14
 
 ARG TARGETPLATFORM
 
@@ -41,7 +41,7 @@ LABEL org.opencontainers.image.source="https://github.com/fluxcd/kustomize-contr
 
 RUN apk add --no-cache ca-certificates curl tini git openssh-client gnupg
 
-RUN kubectl_ver=1.21.0 && \
+RUN kubectl_ver=1.21.2 && \
 arch=${TARGETPLATFORM:-linux/amd64} && \
 if [ "$TARGETPLATFORM" == "linux/arm/v7" ]; then arch="linux/arm"; fi && \
 curl -sL https://storage.googleapis.com/kubernetes-release/release/v${kubectl_ver}/bin/${arch}/kubectl \

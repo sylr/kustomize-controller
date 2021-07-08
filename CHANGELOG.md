@@ -2,6 +2,41 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.13.2
+
+**Release date:** 2021-07-05
+
+This prerelease comes with improvements to health assessment error reporting.
+
+The controller dependencies has been updated to match
+kustomize [v4.2.0](https://github.com/kubernetes-sigs/kustomize/releases/tag/kustomize%2Fv4.2.0).
+
+Improvements:
+* Make it easier to reason about health check failures
+  [#374](https://github.com/fluxcd/kustomize-controller/pull/374)
+* Update Alpine v3.14 and kubectl v1.21.2
+  [#385](https://github.com/fluxcd/kustomize-controller/pull/385)
+* Update controller to kustomize v4.2.0
+  [#383](https://github.com/fluxcd/kustomize-controller/pull/383)
+
+Fixes:
+* Fix typo in dependency ready log
+  [#384](https://github.com/fluxcd/kustomize-controller/pull/384)
+
+## 0.13.1
+
+**Release date:** 2021-06-30
+
+This prerelease comes with kubectl v1.21.1.
+
+Improvements:
+* Update kubectl to v1.21.1
+  [#381](https://github.com/fluxcd/kustomize-controller/pull/381)
+* e2e: Update Kubernetes to v1.21.1
+  [#380](https://github.com/fluxcd/kustomize-controller/pull/380)
+* Improve test coverage of the `dependsOn` feature
+  [#380](https://github.com/fluxcd/kustomize-controller/pull/380)
+
 ## 0.13.0
 
 **Release date:** 2021-06-14
@@ -22,6 +57,9 @@ for more details.
   the set of URLs accepted by Kustomize in the `resources` filed
   is reduced to only file system paths or values compatible with `git clone`.
   This means you can no longer use resources from archives (zip, tgz, etc).
+* YAML anchors are no longer supported in Kustomize v4,
+  see [kustomize/issues/3675](https://github.com/kubernetes-sigs/kustomize/issues/3675)
+  for more details. 
 * Due to a [bug](https://github.com/kubernetes-sigs/kustomize/issues/3446)
   in Kustomize v4, if you have **non-string keys** in your manifests,
   the controller will fail with `json: unsupported type` error.
