@@ -17,8 +17,8 @@ limitations under the License.
 package controllers
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	"errors"
+	"regexp"
 	"strings"
 )
 
@@ -80,10 +80,13 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// ObjectKey returns client.ObjectKey for the object.
-func ObjectKey(object metav1.Object) client.ObjectKey {
-	return client.ObjectKey{
-		Namespace: object.GetNamespace(),
-		Name:      object.GetName(),
-	}
+func stripSensitiveData(err error) error {
+	r := regexp.MustCompile(`(v1.Secret.(StringData|Data):) (.*)`)
+	newErr := r.ReplaceAllString(err.Error(), "$1 [ ** REDACTED ** ]")
+
+	// strip data from bigger context
+	r = regexp.MustCompile(`((stringData|data)\":{)(.*)(})`)
+	newErr = r.ReplaceAllString(newErr, "$1 [ ** REDACTED ** ] $4")
+
+	return errors.New(newErr)
 }
