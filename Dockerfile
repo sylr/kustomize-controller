@@ -23,11 +23,11 @@ COPY --from=gomod /go/pkg/ /go/pkg/
 # copy sources
 COPY . .
 
+# Switch shell to bash
+SHELL ["bash", "-c"]
+
 # build
-RUN CGO_ENABLED=0 \
-GOOS=$(echo "$TARGETPLATFORM" | cut -d '/' -f1 ) \
-GOARCH=$(echo "$TARGETPLATFORM" | cut -d '/' -f2 ) \
-GOARM=$(echo "$TARGETPLATFORM" | cut -d '/' -f3 | sed "s/^v//") \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOARM=${TARGETVARIANT/v/} \
 go build -a -trimpath -o kustomize-controller main.go
 
 # ------------------------------------------------------------------------------
