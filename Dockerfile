@@ -24,6 +24,7 @@ COPY --from=gomod /go/pkg/ /go/pkg/
 COPY . .
 
 # Switch shell to bash
+RUN apk add --no-cache bash
 SHELL ["bash", "-c"]
 
 # build
