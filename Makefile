@@ -6,7 +6,7 @@ IMG_ARCHS         ?= $(IMG_ARCHS_DEFAULT)
 
 # Produce CRDs that work back to Kubernetes 1.16
 CRD_OPTIONS ?= crd:crdVersions=v1
-SOURCE_VER ?= v0.15.4
+SOURCE_VER ?= v0.16.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -17,10 +17,16 @@ endif
 
 all: manager
 
-# Run tests
-test: generate fmt vet manifests api-docs download-crd-deps
-	go test ./... -coverprofile cover.out
-	cd api; go test ./... -coverprofile cover.out
+# Download the envtest binaries to testbin
+ENVTEST_ASSETS_DIR=$(shell pwd)/testbin
+ENVTEST_AKUBERNETES_VERSION=latest
+install-envtest: setup-envtest
+	$(SETUP_ENVTEST) use $(ENVTEST_AKUBERNETES_VERSION) --bin-dir=$(ENVTEST_ASSETS_DIR)
+
+# Run controller tests
+KUBEBUILDER_ASSETS?="$(shell $(SETUP_ENVTEST) use -i $(ENVTEST_AKUBERNETES_VERSION) --bin-dir=$(ENVTEST_ASSETS_DIR) -p path)"
+test: generate fmt vet manifests api-docs download-crd-deps install-envtest
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test ./controllers/...  -v -coverprofile cover.out
 
 # Build manager binary
 manager: generate fmt vet
@@ -69,7 +75,7 @@ manifests: controller-gen
 
 # Generate API reference documentation
 api-docs: gen-crd-api-reference-docs
-	$(API_REF_GEN) -api-dir=./api/v1beta1 -config=./hack/api-docs/config.json -template-dir=./hack/api-docs/template -out-file=./docs/api/kustomize.md
+	$(API_REF_GEN) -api-dir=./api/v1beta2 -config=./hack/api-docs/config.json -template-dir=./hack/api-docs/template -out-file=./docs/api/kustomize.md
 
 # Run go mod tidy
 tidy:
@@ -145,4 +151,19 @@ ifeq (, $(shell which gen-crd-api-reference-docs))
 API_REF_GEN=$(GOBIN)/gen-crd-api-reference-docs
 else
 API_REF_GEN=$(shell which gen-crd-api-reference-docs)
+endif
+
+setup-envtest:
+ifeq (, $(shell which setup-envtest))
+	@{ \
+	set -e ;\
+	SETUP_ENVTEST_TMP_DIR=$$(mktemp -d) ;\
+	cd $$SETUP_ENVTEST_TMP_DIR ;\
+	go mod init tmp ;\
+	go get sigs.k8s.io/controller-runtime/tools/setup-envtest@latest ;\
+	rm -rf $$SETUP_ENVTEST_TMP_DIR ;\
+	}
+SETUP_ENVTEST=$(GOBIN)/setup-envtest
+else
+SETUP_ENVTEST=$(shell which setup-envtest)
 endif

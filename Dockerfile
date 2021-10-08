@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.16-alpine as gomod
+FROM --platform=$BUILDPLATFORM golang:1.17-alpine as gomod
 
 WORKDIR /workspace
 
@@ -12,7 +12,7 @@ RUN go mod download
 # ------------------------------------------------------------------------------
 # go crossbuild stage
 
-FROM --platform=$BUILDPLATFORM golang:1.16-alpine as builder
+FROM --platform=$BUILDPLATFORM golang:1.17-alpine as builder
 
 ARG TARGETPLATFORM
 
@@ -60,6 +60,5 @@ RUN addgroup -S controller && adduser -S controller -G controller
 USER controller
 
 ENV GNUPGHOME=/tmp
-COPY config/kubeconfig /home/controller/.kube/config
 
 ENTRYPOINT [ "/sbin/tini", "--", "kustomize-controller" ]
