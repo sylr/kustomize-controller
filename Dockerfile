@@ -14,7 +14,9 @@ RUN go mod download
 
 FROM --platform=$BUILDPLATFORM golang:1.17-alpine as builder
 
-ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 WORKDIR /workspace
 
