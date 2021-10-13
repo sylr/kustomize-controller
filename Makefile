@@ -15,6 +15,11 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+# Allows for defining additional Docker buildx arguments, e.g. '--push'.
+BUILD_ARGS ?=
+# Architectures to build images for.
+BUILD_PLATFORMS ?= linux/amd64,linux/arm64,linux/arm/v7
+
 all: manager
 
 # Download the envtest binaries to testbin
