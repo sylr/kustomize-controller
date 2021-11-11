@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +33,7 @@ import (
 	"go.mozilla.org/sops/v3/cmd/sops/formats"
 	"go.mozilla.org/sops/v3/keyservice"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/kustomize/api/konfig"
@@ -65,7 +65,7 @@ func NewDecryptor(kubeClient client.Client,
 
 func NewTempDecryptor(kubeClient client.Client,
 	kustomization kustomizev1.Kustomization) (*KustomizeDecryptor, func(), error) {
-	tmpDir, err := ioutil.TempDir("", fmt.Sprintf("decryptor-%s-", kustomization.Name))
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("decryptor-%s-", kustomization.Name))
 	if err != nil {
 		return nil, nil, fmt.Errorf("tmp dir error: %w", err)
 	}
@@ -140,7 +140,7 @@ func (kd *KustomizeDecryptor) ImportKeys(ctx context.Context) error {
 			return fmt.Errorf("decryption secret error: %w", err)
 		}
 
-		tmpDir, err := ioutil.TempDir("", kd.kustomization.Name)
+		tmpDir, err := os.MkdirTemp("", kd.kustomization.Name)
 		if err != nil {
 			return fmt.Errorf("tmp dir error: %w", err)
 		}
@@ -154,7 +154,7 @@ func (kd *KustomizeDecryptor) ImportKeys(ctx context.Context) error {
 				if err != nil {
 					return err
 				}
-				if err := ioutil.WriteFile(keyPath, file, os.ModePerm); err != nil {
+				if err := os.WriteFile(keyPath, file, os.ModePerm); err != nil {
 					return fmt.Errorf("unable to write key to storage: %w", err)
 				}
 				if err := kd.gpgImport(keyPath); err != nil {
@@ -185,7 +185,7 @@ func (kd *KustomizeDecryptor) gpgImport(path string) error {
 
 func (kd *KustomizeDecryptor) decryptDotEnvFiles(dirpath string) error {
 	kustomizePath := filepath.Join(dirpath, konfig.DefaultKustomizationFileName())
-	ksData, err := ioutil.ReadFile(kustomizePath)
+	ksData, err := os.ReadFile(kustomizePath)
 	if err != nil {
 		return nil
 	}
@@ -224,7 +224,7 @@ func (kd *KustomizeDecryptor) decryptDotEnvFiles(dirpath string) error {
 			}
 
 			envPath := filepath.Join(dirpath, envFile)
-			data, err := ioutil.ReadFile(envPath)
+			data, err := os.ReadFile(envPath)
 			if err != nil {
 				return err
 			}
@@ -235,7 +235,7 @@ func (kd *KustomizeDecryptor) decryptDotEnvFiles(dirpath string) error {
 					return err
 				}
 
-				err = ioutil.WriteFile(envPath, out, 0644)
+				err = os.WriteFile(envPath, out, 0644)
 				if err != nil {
 					return fmt.Errorf("error writing to file: %w", err)
 				}
@@ -288,4 +288,14 @@ func isDir(path string) (bool, error) {
 	}
 
 	return fileInfo.IsDir(), nil
+}
+
+// IsEncryptedSecret checks if the given object is a Kubernetes Secret encrypted with Mozilla SOPS.
+func IsEncryptedSecret(object *unstructured.Unstructured) bool {
+	if object.GetKind() == "Secret" && object.GetAPIVersion() == "v1" {
+		if _, found, _ := unstructured.NestedFieldNoCopy(object.Object, "sops"); found {
+			return true
+		}
+	}
+	return false
 }
