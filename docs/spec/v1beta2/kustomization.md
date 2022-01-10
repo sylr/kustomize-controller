@@ -344,6 +344,11 @@ Note that when the `kustomize.toolkit.fluxcd.io/reconcile` annotation is set to 
 the controller will no longer apply changes from source, nor will it prune the resource.
 To resume reconciliation, set the annotation to `enabled` or remove it.
 
+Note that due to the way [Kubernetes server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
+works, the kustomize-controller can only revert
+changes made to fields it manages. This means that `kubectl edit` changes will only be reverted if
+those fields are present in git.
+
 ## Garbage collection
 
 To enable garbage collection, set `spec.prune` to `true`.
@@ -521,7 +526,7 @@ For example, a service mesh proxy injector should be running before deploying ap
 ## Role-based access control
 
 By default, a Kustomization apply runs under the cluster admin account and can create, modify, delete
-cluster level objects (namespaces, CRDs, etc) and namespeced objects (deployments, ingresses, etc).
+cluster level objects (namespaces, CRDs, etc) and namespaced objects (deployments, ingresses, etc).
 For certain Kustomizations a cluster admin may wish to control what types of Kubernetes objects can
 be reconciled and under which namespaces.
 To restrict a Kustomization, one can assign a service account under which the reconciliation is performed.
@@ -754,6 +759,19 @@ spec:
         name: cluster-vars
       - kind: Secret
         name: cluster-secret-vars
+```
+
+Note that for substituting variables in a secret, `spec.stringData` field must be used i.e
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: secret
+  namespace: flux-system
+type: Opaque
+stringData:
+  token: ${token}
 ```
 
 The var values which are specified in-line with `substitute`

@@ -31,7 +31,6 @@ import (
 	"time"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
-	"github.com/go-logr/logr"
 	"github.com/hashicorp/go-retryablehttp"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -140,7 +139,7 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 }
 
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 	reconcileStart := time.Now()
 
 	var kustomization kustomizev1.Kustomization
@@ -206,7 +205,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// check dependencies
 	if len(kustomization.Spec.DependsOn) > 0 {
-		if err := r.checkDependencies(kustomization); err != nil {
+		if err := r.checkDependencies(source, kustomization); err != nil {
 			kustomization = kustomizev1.KustomizationNotReady(
 				kustomization, source.GetArtifact().Revision, meta.DependencyNotReadyReason, err.Error())
 			if err := r.patchStatus(ctx, req, kustomization.Status); err != nil {
@@ -471,7 +470,7 @@ func (r *KustomizationReconciler) reconcile(
 	), nil
 }
 
-func (r *KustomizationReconciler) checkDependencies(kustomization kustomizev1.Kustomization) error {
+func (r *KustomizationReconciler) checkDependencies(source sourcev1.Source, kustomization kustomizev1.Kustomization) error {
 	for _, d := range kustomization.Spec.DependsOn {
 		if d.Namespace == "" {
 			d.Namespace = kustomization.GetNamespace()
@@ -489,6 +488,10 @@ func (r *KustomizationReconciler) checkDependencies(kustomization kustomizev1.Ku
 
 		if !apimeta.IsStatusConditionTrue(k.Status.Conditions, meta.ReadyCondition) {
 			return fmt.Errorf("dependency '%s' is not ready", dName)
+		}
+
+		if k.Spec.SourceRef.Name == kustomization.Spec.SourceRef.Name && k.Spec.SourceRef.Namespace == kustomization.Spec.SourceRef.Namespace && k.Spec.SourceRef.Kind == kustomization.Spec.SourceRef.Kind && source.GetArtifact().Revision != k.Status.LastAppliedRevision {
+			return fmt.Errorf("dependency '%s' is not updated yet", dName)
 		}
 	}
 
@@ -667,7 +670,7 @@ func (r *KustomizationReconciler) build(ctx context.Context, kustomization kusto
 }
 
 func (r *KustomizationReconciler) apply(ctx context.Context, manager *ssa.ResourceManager, kustomization kustomizev1.Kustomization, revision string, objects []*unstructured.Unstructured) (bool, *ssa.ChangeSet, error) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	if err := ssa.SetNativeKindsDefaults(objects); err != nil {
 		return false, nil, err
@@ -819,7 +822,7 @@ func (r *KustomizationReconciler) prune(ctx context.Context, manager *ssa.Resour
 		return false, nil
 	}
 
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	opts := ssa.DeleteOptions{
 		PropagationPolicy: metav1.DeletePropagationBackground,
@@ -846,7 +849,7 @@ func (r *KustomizationReconciler) prune(ctx context.Context, manager *ssa.Resour
 }
 
 func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization kustomizev1.Kustomization) (ctrl.Result, error) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 	if kustomization.Spec.Prune &&
 		!kustomization.Spec.Suspend &&
 		kustomization.Status.Inventory != nil &&
@@ -902,18 +905,20 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 }
 
 func (r *KustomizationReconciler) event(ctx context.Context, kustomization kustomizev1.Kustomization, revision, severity, msg string, metadata map[string]string) {
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
-	annotations := map[string]string{
-		kustomizev1.GroupVersion.Group + "/revision": revision,
+	if r.EventRecorder != nil {
+		annotations := map[string]string{
+			kustomizev1.GroupVersion.Group + "/revision": revision,
+		}
+
+		eventtype := "Normal"
+		if severity == events.EventSeverityError {
+			eventtype = "Warning"
+		}
+
+		r.EventRecorder.AnnotatedEventf(&kustomization, annotations, eventtype, severity, msg)
 	}
-
-	eventtype := "Normal"
-	if severity == events.EventSeverityError {
-		eventtype = "Warning"
-	}
-
-	r.EventRecorder.AnnotatedEventf(&kustomization, annotations, eventtype, severity, msg)
 
 	if r.ExternalEventRecorder != nil {
 		objRef, err := reference.GetReference(r.Scheme, &kustomization)
@@ -944,7 +949,7 @@ func (r *KustomizationReconciler) recordReadiness(ctx context.Context, kustomiza
 	if r.MetricsRecorder == nil {
 		return
 	}
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	objRef, err := reference.GetReference(r.Scheme, &kustomization)
 	if err != nil {
@@ -965,7 +970,7 @@ func (r *KustomizationReconciler) recordSuspension(ctx context.Context, kustomiz
 	if r.MetricsRecorder == nil {
 		return
 	}
-	log := logr.FromContext(ctx)
+	log := ctrl.LoggerFrom(ctx)
 
 	objRef, err := reference.GetReference(r.Scheme, &kustomization)
 	if err != nil {

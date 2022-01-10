@@ -1,4 +1,14 @@
-FROM --platform=$BUILDPLATFORM golang:1.17-alpine as gomod
+ARG GO_VERSION=1.17
+ARG XX_VERSION=1.1.0
+
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:${XX_VERSION} AS xx
+
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine as builder
+
+# Copy the build utilities.
+COPY --from=xx / /
+
+ARG TARGETPLATFORM
 
 WORKDIR /workspace
 
@@ -36,7 +46,7 @@ go build -a -trimpath -o kustomize-controller main.go
 # ------------------------------------------------------------------------------
 # Final images build stage
 
-FROM --platform=$TARGETPLATFORM alpine:3.14
+FROM --platform=$TARGETPLATFORM alpine:3.15
 
 ARG TARGETPLATFORM
 
