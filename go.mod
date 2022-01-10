@@ -36,6 +36,7 @@ require (
 
 require (
 	cloud.google.com/go v0.81.0 // indirect
+	filippo.io/edwards25519 v1.0.0-rc.1 // indirect
 	github.com/Azure/azure-sdk-for-go v31.2.0+incompatible // indirect
 	github.com/Azure/go-autorest v14.2.0+incompatible // indirect
 	github.com/Azure/go-autorest/autorest v0.11.18 // indirect
@@ -142,11 +143,13 @@ require (
 	k8s.io/utils v0.0.0-20211208161948-7d6a63dca704 // indirect
 	sigs.k8s.io/json v0.0.0-20211208200746-9f7c6b3444d2 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.2.0 // indirect
+	sylr.dev/yaml/age/v3 v3.0.0-20210907063746-ab99b234209c // indirect
+	sylr.dev/yaml/v3 v3.0.0-20210127132132-941109e4f08c // indirect
 )
 
 // pin kustomize to v4.4.1
 replace (
-	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.10.2-0.20211113185533-c786d61d5893
+	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.10.2-0.20220110174742-d098629f0557
 	sigs.k8s.io/kustomize/kyaml => sigs.k8s.io/kustomize/kyaml v0.13.0
 )
 
