@@ -259,12 +259,36 @@ Source supported types:
 > If your Git repository or S3 bucket contains only plain manifests,
 > then a kustomization.yaml will be automatically generated.
 
+### Cross-namespace references
+
+A Kustomization can refer to a source from a different namespace with `spec.sourceRef.namespace` e.g.:
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
+kind: Kustomization
+metadata:
+  name: webapp
+  namespace: apps
+spec:
+  interval: 5m
+  path: "./deploy"
+  sourceRef:
+    kind: GitRepository
+    name: webapp
+    namespace: shared
+```
+
+On multi-tenant clusters, platform admins can disable cross-namespace references with the
+`--no-cross-namespace-refs=true` flag.
+
 ## Generate kustomization.yaml
 
-If your repository contains plain Kubernetes manifests, the `kustomization.yaml`
-file is automatically generated for all the Kubernetes manifests
-in the `spec.path` and sub-directories. This expects all YAML files present under that path to be valid kubernetes manifests
-and needs non-kubernetes ones to be excluded using `.sourceignore` file or `spec.ignore` on `GitRepository` object.
+If your repository contains plain Kubernetes manifests, the
+`kustomization.yaml` file is automatically generated for all the Kubernetes
+manifests in the `spec.path` of the Flux `Kustomization` and sub-directories.
+This expects all YAML files present under that path to be valid kubernetes
+manifests and needs non-kubernetes ones to be excluded using `.sourceignore`
+file or `spec.ignore` on `GitRepository` object.
 
 Example of excluding CI workflows and SOPS config files:
 
@@ -543,7 +567,7 @@ metadata:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: webapp-reconciler
+  name: flux
   namespace: webapp
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -567,7 +591,7 @@ roleRef:
   name: webapp-reconciler
 subjects:
 - kind: ServiceAccount
-  name: webapp-reconciler
+  name: flux
   namespace: webapp
 ```
 
@@ -584,7 +608,7 @@ metadata:
   name: backend
   namespace: webapp
 spec:
-  serviceAccountName: webapp-reconciler
+  serviceAccountName: flux
   dependsOn:
     - name: common
   interval: 5m
@@ -595,10 +619,19 @@ spec:
     name: webapp
 ```
 
-When the controller reconciles the `frontend-webapp` Kustomization, it will impersonate the `webapp-reconciler`
+When the controller reconciles the `frontend-webapp` Kustomization, it will impersonate the `flux`
 account. If the Kustomization contains cluster level objects like CRDs or objects belonging to a different
 namespace, the reconciliation will fail since the account it runs under has no permissions to alter objects
 outside of the `webapp` namespace.
+
+### Enforce impersonation
+
+On multi-tenant clusters, platform admins can enforce impersonation with the
+`--default-service-account` flag.
+
+When the flag is set, all Kustomizations which don't have `spec.serviceAccountName` specified
+will use the service account name provided by `--default-service-account=<SA Name>`
+in the namespace of the object.
 
 ## Override kustomize config
 
@@ -778,8 +811,11 @@ The var values which are specified in-line with `substitute`
 take precedence over the ones in `substituteFrom`.
 
 Note that if you want to avoid var substitutions in scripts embedded in ConfigMaps or container commands,
-you must use the format `$var` instead of `${var}`. All the undefined variables in the format `${var}`
-will be substituted with string empty, unless a default is provided e.g. `${var:=default}`.
+you must use the format `$var` instead of `${var}`. If you want to keep the curly braces you can use `$${var}`
+which will print out `${var}`. 
+
+All the undefined variables in the format `${var}` will be substituted with string empty, unless a default 
+is provided e.g. `${var:=default}`.
 
 You can disable the variable substitution for certain resources by either
 labeling or annotating them with:
@@ -901,6 +937,9 @@ kubectl create secret generic prod-kubeconfig \
 > KubeConfigs with `cmd-path` in them likely won't work without a custom,
 > per-provider installation of kustomize-controller.
 
+When both `spec.kubeConfig` and `spec.ServiceAccountName` are specified,
+the controller will impersonate the service account on the target cluster.
+
 ## Secrets decryption
 
 In order to store secrets safely in a public or private Git repository,
@@ -998,6 +1037,54 @@ spec:
       name: sops-age
 ```
 
+### HashiCorp Vault
+
+Export the `VAULT_ADDR`  and `VAULT_TOKEN` environment variables to your shell,
+then use `sops` to encrypt a kubernetes secret (see [HashiCorp Vault](https://www.vaultproject.io/docs/secrets/transit)
+for more details on enabling the transit backend and [sops](https://github.com/mozilla/sops#encrypting-using-hashicorp-vault)).
+
+Then use `sops` to encrypt a kubernetes secret:
+
+```console
+$ export VAULT_ADDR=https://vault.example.com:8200
+$ export VAULT_TOKEN=my-token
+$ sops --hc-vault-transit $VAULT_ADDR/v1/sops/keys/my-encryption-key --encrypt \
+--encrypted-regex '^(data|stringData)$' --in-place my-secret.yaml
+```
+
+Commit and push the encrypted file to Git.
+
+> **Note** that you should encrypt only the `data` section, encrypting the Kubernetes
+> secret metadata, kind or apiVersion is not supported by kustomize-controller.
+
+Create a secret in the `default` namespace with the vault token,
+the key name must be `sops.vault-token` to be detected as a vault token:
+
+```sh
+echo $VAULT_TOKEN |
+kubectl -n default create secret generic sops-hcvault \
+--from-file=sops.vault-token=/dev/stdin
+```
+
+Configure decryption by referring the private key secret:
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1beta2
+kind: Kustomization
+metadata:
+  name: my-secrets
+  namespace: default
+spec:
+  interval: 5m
+  path: "./"
+  sourceRef:
+    kind: GitRepository
+    name: my-secrets
+  decryption:
+    provider: sops
+    secretRef:
+      name: sops-hcvault
+```
 ### Kustomize secretGenerator
 
 SOPS encrypted data can be stored as a base64 encoded Secret,

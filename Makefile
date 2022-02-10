@@ -6,7 +6,7 @@ IMG_ARCHS         ?= $(IMG_ARCHS_DEFAULT)
 
 # Produce CRDs that work back to Kubernetes 1.16
 CRD_OPTIONS ?= crd:crdVersions=v1
-SOURCE_VER ?= v0.20.1
+SOURCE_VER ?= v0.21.2
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -26,7 +26,7 @@ ENVTEST_ARCH ?= amd64
 all: manager
 
 # Download the envtest binaries to testbin
-ENVTEST_ASSETS_DIR=$(shell pwd)/testbin
+ENVTEST_ASSETS_DIR=$(shell pwd)/build/testbin
 ENVTEST_KUBERNETES_VERSION?=latest
 install-envtest: setup-envtest
 	mkdir -p ${ENVTEST_ASSETS_DIR}
@@ -159,3 +159,22 @@ GOBIN=$(PROJECT_DIR)/bin go install $(2) ;\
 rm -rf $$TMP_DIR ;\
 }
 endef
+
+# Build fuzzers
+fuzz-build:
+	rm -rf $(shell pwd)/build/fuzz/
+	mkdir -p $(shell pwd)/build/fuzz/out/
+
+	docker build . --tag local-fuzzing:latest -f tests/fuzz/Dockerfile.builder
+	docker run --rm \
+		-e FUZZING_LANGUAGE=go -e SANITIZER=address \
+		-e CIFUZZ_DEBUG='True' -e OSS_FUZZ_PROJECT_NAME=fluxcd \
+		-v "$(shell pwd)/build/fuzz/out":/out \
+		local-fuzzing:latest
+
+fuzz-smoketest: fuzz-build
+	docker run --rm \
+		-v "$(shell pwd)/build/fuzz/out":/out \
+		-v "$(shell pwd)/tests/fuzz/oss_fuzz_run.sh":/runner.sh \
+		local-fuzzing:latest \
+		bash -c "/runner.sh"

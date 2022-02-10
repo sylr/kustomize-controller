@@ -32,6 +32,7 @@ import (
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/hashicorp/go-retryablehttp"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -53,7 +54,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
 
+	apiacl "github.com/fluxcd/pkg/apis/acl"
 	"github.com/fluxcd/pkg/apis/meta"
+	"github.com/fluxcd/pkg/runtime/acl"
 	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/predicates"
@@ -83,8 +86,12 @@ type KustomizationReconciler struct {
 	MetricsRecorder       *metrics.Recorder
 	StatusPoller          *polling.StatusPoller
 	ControllerName        string
+	statusManager         string
+	NoCrossNamespaceRefs  bool
+	DefaultServiceAccount string
 }
 
+// KustomizationReconcilerOptions contains options for the KustomizationReconciler.
 type KustomizationReconcilerOptions struct {
 	MaxConcurrentReconciles   int
 	HTTPRetry                 int
@@ -110,6 +117,7 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 	}
 
 	r.requeueDependency = opts.DependencyRequeueInterval
+	r.statusManager = fmt.Sprintf("gotk-%s", r.ControllerName)
 
 	// Configure the retryable http client used for fetching artifacts.
 	// By default it retries 10 times within a 3.5 minutes window.
@@ -152,8 +160,9 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Add our finalizer if it does not exist
 	if !controllerutil.ContainsFinalizer(&kustomization, kustomizev1.KustomizationFinalizer) {
+		patch := client.MergeFrom(kustomization.DeepCopy())
 		controllerutil.AddFinalizer(&kustomization, kustomizev1.KustomizationFinalizer)
-		if err := r.Update(ctx, &kustomization); err != nil {
+		if err := r.Patch(ctx, &kustomization, patch, client.FieldOwner(r.statusManager)); err != nil {
 			log.Error(err, "unable to register finalizer")
 			return ctrl.Result{}, err
 		}
@@ -177,17 +186,28 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			msg := fmt.Sprintf("Source '%s' not found", kustomization.Spec.SourceRef.String())
 			kustomization = kustomizev1.KustomizationNotReady(kustomization, "", kustomizev1.ArtifactFailedReason, msg)
 			if err := r.patchStatus(ctx, req, kustomization.Status); err != nil {
-				log.Error(err, "unable to update status for source not found")
 				return ctrl.Result{Requeue: true}, err
 			}
 			r.recordReadiness(ctx, kustomization)
 			log.Info(msg)
 			// do not requeue immediately, when the source is created the watcher should trigger a reconciliation
 			return ctrl.Result{RequeueAfter: kustomization.GetRetryInterval()}, nil
-		} else {
-			// retry on transient errors
-			return ctrl.Result{Requeue: true}, err
 		}
+
+		if acl.IsAccessDenied(err) {
+			kustomization = kustomizev1.KustomizationNotReady(kustomization, "", apiacl.AccessDeniedReason, err.Error())
+			if err := r.patchStatus(ctx, req, kustomization.Status); err != nil {
+				return ctrl.Result{Requeue: true}, err
+			}
+			log.Error(err, "access denied to cross-namespace source")
+			r.recordReadiness(ctx, kustomization)
+			r.event(ctx, kustomization, "unknown", events.EventSeverityError, err.Error(), nil)
+			return ctrl.Result{RequeueAfter: kustomization.GetRetryInterval()}, nil
+		}
+
+		// retry on transient errors
+		return ctrl.Result{Requeue: true}, err
+
 	}
 
 	if source.GetArtifact() == nil {
@@ -235,7 +255,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// set the reconciliation status to progressing
 	kustomization = kustomizev1.KustomizationProgressing(kustomization, "reconciliation in progress")
 	if err := r.patchStatus(ctx, req, kustomization.Status); err != nil {
-		log.Error(err, "unable to update status to progressing")
 		return ctrl.Result{Requeue: true}, err
 	}
 	r.recordReadiness(ctx, kustomization)
@@ -243,7 +262,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// reconcile kustomization by applying the latest revision
 	reconciledKustomization, reconcileErr := r.reconcile(ctx, *kustomization.DeepCopy(), source)
 	if err := r.patchStatus(ctx, req, reconciledKustomization.Status); err != nil {
-		log.Error(err, "unable to update status after reconciliation")
 		return ctrl.Result{Requeue: true}, err
 	}
 	r.recordReadiness(ctx, reconciledKustomization)
@@ -326,7 +344,7 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// setup the Kubernetes client for impersonation
-	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, dirPath)
+	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount)
 	kubeClient, statusPoller, err := impersonation.GetClient(ctx)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
@@ -572,6 +590,13 @@ func (r *KustomizationReconciler) getSource(ctx context.Context, kustomization k
 		Namespace: sourceNamespace,
 		Name:      kustomization.Spec.SourceRef.Name,
 	}
+
+	if r.NoCrossNamespaceRefs && sourceNamespace != kustomization.GetNamespace() {
+		return source, acl.AccessDeniedError(
+			fmt.Sprintf("can't access '%s/%s', cross-namespace references have been blocked",
+				kustomization.Spec.SourceRef.Kind, namespacedName))
+	}
+
 	switch kustomization.Spec.SourceRef.Kind {
 	case sourcev1.GitRepositoryKind:
 		var repository sourcev1.GitRepository
@@ -630,6 +655,11 @@ func (r *KustomizationReconciler) build(ctx context.Context, kustomization kusto
 	}
 
 	for _, res := range m.Resources() {
+		// check if resources conform to the Kubernetes API conventions
+		if res.GetName() == "" || res.GetKind() == "" || res.GetApiVersion() == "" {
+			return nil, fmt.Errorf("failed to decode Kubernetes apiVersion, kind and name from: %v", res.String())
+		}
+
 		// check if resources are encrypted and decrypt them before generating the final YAML
 		if kustomization.Spec.Decryption != nil {
 			outRes, err := dec.Decrypt(res)
@@ -680,6 +710,41 @@ func (r *KustomizationReconciler) apply(ctx context.Context, manager *ssa.Resour
 	applyOpts.Force = kustomization.Spec.Force
 	applyOpts.Exclusions = map[string]string{
 		fmt.Sprintf("%s/reconcile", kustomizev1.GroupVersion.Group): kustomizev1.DisabledValue,
+	}
+	applyOpts.Cleanup = ssa.ApplyCleanupOptions{
+		Annotations: []string{
+			// remove the kubectl annotation
+			corev1.LastAppliedConfigAnnotation,
+			// remove deprecated fluxcd.io annotations
+			"kustomize.toolkit.fluxcd.io/checksum",
+			"fluxcd.io/sync-checksum",
+		},
+		Labels: []string{
+			// remove deprecated fluxcd.io labels
+			"fluxcd.io/sync-gc-mark",
+		},
+		FieldManagers: []ssa.FieldManager{
+			{
+				// to undo changes made with 'kubectl apply --server-side --force-conflicts'
+				Name:          "kubectl",
+				OperationType: metav1.ManagedFieldsOperationApply,
+			},
+			{
+				// to undo changes made with 'kubectl apply'
+				Name:          "kubectl",
+				OperationType: metav1.ManagedFieldsOperationUpdate,
+			},
+			{
+				// to undo changes made with 'kubectl apply'
+				Name:          "before-first-apply",
+				OperationType: metav1.ManagedFieldsOperationUpdate,
+			},
+			{
+				// to undo changes made by the controller before SSA
+				Name:          r.ControllerName,
+				OperationType: metav1.ManagedFieldsOperationUpdate,
+			},
+		},
 	}
 
 	// contains only CRDs and Namespaces
@@ -856,14 +921,13 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 		kustomization.Status.Inventory.Entries != nil {
 		objects, _ := ListObjectsInInventory(kustomization.Status.Inventory)
 
-		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, "")
-		kubeClient, _, err := impersonation.GetClient(ctx)
-		if err != nil {
-			// when impersonation fails, log the stale objects and continue with the finalization
-			msg := fmt.Sprintf("unable to prune objects: \n%s", ssa.FmtUnstructuredList(objects))
-			log.Error(fmt.Errorf("failed to build kube client: %w", err), msg)
-			r.event(ctx, kustomization, kustomization.Status.LastAppliedRevision, events.EventSeverityError, msg, nil)
-		} else {
+		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount)
+		if impersonation.CanFinalize(ctx) {
+			kubeClient, _, err := impersonation.GetClient(ctx)
+			if err != nil {
+				return ctrl.Result{}, err
+			}
+
 			resourceManager := ssa.NewResourceManager(kubeClient, nil, ssa.Owner{
 				Field: r.ControllerName,
 				Group: kustomizev1.GroupVersion.Group,
@@ -888,6 +952,11 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 			if changeSet != nil && len(changeSet.Entries) > 0 {
 				r.event(ctx, kustomization, kustomization.Status.LastAppliedRevision, events.EventSeverityInfo, changeSet.String(), nil)
 			}
+		} else {
+			// when the account to impersonate is gone, log the stale objects and continue with the finalization
+			msg := fmt.Sprintf("unable to prune objects: \n%s", ssa.FmtUnstructuredList(objects))
+			log.Error(fmt.Errorf("skiping pruning, failed to find account to impersonate"), msg)
+			r.event(ctx, kustomization, kustomization.Status.LastAppliedRevision, events.EventSeverityError, msg, nil)
 		}
 	}
 
@@ -896,7 +965,7 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 
 	// Remove our finalizer from the list and update it
 	controllerutil.RemoveFinalizer(&kustomization, kustomizev1.KustomizationFinalizer)
-	if err := r.Update(ctx, &kustomization); err != nil {
+	if err := r.Update(ctx, &kustomization, client.FieldOwner(r.statusManager)); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -993,6 +1062,5 @@ func (r *KustomizationReconciler) patchStatus(ctx context.Context, req ctrl.Requ
 
 	patch := client.MergeFrom(kustomization.DeepCopy())
 	kustomization.Status = newStatus
-
-	return r.Status().Patch(ctx, &kustomization, patch)
+	return r.Status().Patch(ctx, &kustomization, patch, client.FieldOwner(r.statusManager))
 }
