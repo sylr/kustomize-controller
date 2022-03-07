@@ -285,10 +285,10 @@ On multi-tenant clusters, platform admins can disable cross-namespace references
 
 If your repository contains plain Kubernetes manifests, the
 `kustomization.yaml` file is automatically generated for all the Kubernetes
-manifests in the `spec.path` of the Flux `Kustomization` and sub-directories.
-This expects all YAML files present under that path to be valid kubernetes
-manifests and needs non-kubernetes ones to be excluded using `.sourceignore`
-file or `spec.ignore` on `GitRepository` object.
+manifests in the directory tree specified in the `spec.path` field of the Flux `Kustomization`.
+All YAML files present under that path must be valid Kubernetes
+manifests, unless they're excluded either by way of the `.sourceignore`
+file or the `spec.ignore` field on the corresponding `GitRepository` object.
 
 Example of excluding CI workflows and SOPS config files:
 
@@ -368,10 +368,18 @@ Note that when the `kustomize.toolkit.fluxcd.io/reconcile` annotation is set to 
 the controller will no longer apply changes from source, nor will it prune the resource.
 To resume reconciliation, set the annotation to `enabled` or remove it.
 
-Note that due to the way [Kubernetes server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
-works, the kustomize-controller can only revert
-changes made to fields it manages. This means that `kubectl edit` changes will only be reverted if
-those fields are present in git.
+If you use kubectl to edit an object managed by Flux,
+all changes will be undone when kustomize-controller reconciles a
+Flux Kustomization containing that object.
+n order for kustomize-controller to preserve fields added with kubectl,
+you have to specify a field manager named `flux-client-side-apply` e.g.:
+
+```sh
+kubectl apply --field-manager=flux-client-side-apply
+```
+
+Note that the fields defined in manifests will always be overridden,
+the above procedure works only for adding new fields that don’t overlap with the desired state.
 
 ## Garbage collection
 
@@ -748,6 +756,16 @@ With `spec.postBuild.substituteFrom` you can provide a list of ConfigMaps and Se
 from which the variables are loaded.
 The ConfigMap and Secret data keys are used as the var names.
 
+The `spec.postBuild.substituteFrom.optional` field indicates how the
+controller should handle a referenced ConfigMap or Secret being absent
+at renconciliation time. The controller's default behavior ― with
+`optional` unspecified or set to `false` ― has it fail reconciliation if
+the referenced object is missing. By setting the `optional` field to
+`true`, you can indicate that controller should use the referenced
+object if it's there, but also tolerate its absence, treating that
+absence as if the object had been present but empty, defining no
+variables.
+
 This offers basic templating for your manifests including support
 for [bash string replacement functions](https://github.com/drone/envsubst) e.g.:
 
@@ -790,8 +808,11 @@ spec:
     substituteFrom:
       - kind: ConfigMap
         name: cluster-vars
+        # Use this ConfigMap if it exists, but proceed if it doesn't.
+        optional: true
       - kind: Secret
         name: cluster-secret-vars
+        # Fail if this Secret does not exist.
 ```
 
 Note that for substituting variables in a secret, `spec.stringData` field must be used i.e
@@ -1040,10 +1061,10 @@ spec:
 ### HashiCorp Vault
 
 Export the `VAULT_ADDR`  and `VAULT_TOKEN` environment variables to your shell,
-then use `sops` to encrypt a kubernetes secret (see [HashiCorp Vault](https://www.vaultproject.io/docs/secrets/transit)
+then use `sops` to encrypt a Kubernetes Secret (see [HashiCorp Vault](https://www.vaultproject.io/docs/secrets/transit)
 for more details on enabling the transit backend and [sops](https://github.com/mozilla/sops#encrypting-using-hashicorp-vault)).
 
-Then use `sops` to encrypt a kubernetes secret:
+Then use `sops` to encrypt a Kubernetes Secret:
 
 ```console
 $ export VAULT_ADDR=https://vault.example.com:8200
