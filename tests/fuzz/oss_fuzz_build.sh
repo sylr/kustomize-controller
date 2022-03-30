@@ -22,7 +22,7 @@ PROJECT_PATH="github.com/fluxcd/kustomize-controller"
 
 cd "${GO_SRC}"
 
-# Move fuzzer to their respective directories. 
+# Move fuzzer to their respective directories.
 # This removes dependency noises from the modules' go.mod and go.sum files.
 mv "${PROJECT_PATH}/tests/fuzz/age_fuzzer.go" "${PROJECT_PATH}/internal/sops/age/"
 mv "${PROJECT_PATH}/tests/fuzz/pgp_fuzzer.go" "${PROJECT_PATH}/internal/sops/pgp/"
@@ -38,7 +38,7 @@ sed -i 's;import (;import(\n	abc "github.com/fluxcd/kustomize-controller/control
 
 pushd "${PROJECT_PATH}"
 
-go mod tidy
+go get -d github.com/AdaLogics/go-fuzz-headers
 
 compile_go_fuzzer "${PROJECT_PATH}/internal/sops/age/" FuzzAge fuzz_age
 compile_go_fuzzer "${PROJECT_PATH}/internal/sops/pgp/" FuzzPgp fuzz_pgp
@@ -54,7 +54,15 @@ cp ../../config/crd/bases/*.yaml testdata/crd
 cp ../../controllers/testdata/sops/age.txt testdata/sops
 cp ../../controllers/testdata/sops/pgp.asc testdata/sops
 
-go mod tidy
+# Use main go.mod in order to conserve the same version across all dependencies.
+cp ../../go.mod .
+cp ../../go.sum .
+
+sed -i 's;module .*;module github.com/fluxcd/kustomize-controller/tests/fuzz;g' go.mod
+sed -i 's;api => ./api;api => ../../api;g' go.mod
+echo "replace github.com/fluxcd/kustomize-controller => ../../" >> go.mod
+
+go mod download
 
 compile_go_fuzzer "${PROJECT_PATH}/tests/fuzz/" FuzzControllers fuzz_controllers
 

@@ -6,7 +6,7 @@ IMG_ARCHS         ?= $(IMG_ARCHS_DEFAULT)
 
 # Produce CRDs that work back to Kubernetes 1.16
 CRD_OPTIONS ?= crd:crdVersions=v1
-SOURCE_VER ?= v0.21.2
+SOURCE_VER ?= v0.22.3
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -15,8 +15,11 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+# Allows for defining additional Go test args, e.g. '-tags integration'.
+GO_TEST_ARGS ?=
+
 # Allows for defining additional Docker buildx arguments, e.g. '--push'.
-BUILD_ARGS ?=
+BUILD_ARGS ?= --load
 # Architectures to build images for.
 BUILD_PLATFORMS ?= linux/amd64
 
@@ -34,8 +37,8 @@ install-envtest: setup-envtest
 
 # Run controller tests
 KUBEBUILDER_ASSETS?="$(shell $(ENVTEST) --arch=$(ENVTEST_ARCH) use -i $(ENVTEST_KUBERNETES_VERSION) --bin-dir=$(ENVTEST_ASSETS_DIR) -p path)"
-test: generate fmt vet manifests api-docs download-crd-deps install-envtest
-	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test ./controllers/...  -v -coverprofile cover.out
+test: tidy generate fmt vet manifests api-docs download-crd-deps install-envtest
+	KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS) go test ./... $(GO_TEST_ARGS) -v -coverprofile cover.out
 
 # Build manager binary
 manager: generate fmt vet
@@ -88,8 +91,8 @@ api-docs: gen-crd-api-reference-docs
 
 # Run go mod tidy
 tidy:
-	cd api; rm -f go.sum; go mod tidy
-	rm -f go.sum; go mod tidy
+	cd api; rm -f go.sum; go mod tidy -compat=1.17
+	rm -f go.sum; go mod tidy -compat=1.17
 
 # Run go fmt against code
 fmt:

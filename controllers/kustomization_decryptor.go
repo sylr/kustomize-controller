@@ -42,6 +42,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	"github.com/fluxcd/kustomize-controller/internal/sops/azkv"
 	intkeyservice "github.com/fluxcd/kustomize-controller/internal/sops/keyservice"
 )
 
@@ -50,14 +51,18 @@ const (
 	DecryptionProviderSOPS = "sops"
 	// DecryptionVaultTokenFileName is the name of the file containing the Vault token
 	DecryptionVaultTokenFileName = "sops.vault-token"
+	// DecryptionAzureAuthFile is the Azure authentication file
+	DecryptionAzureAuthFile = "sops.azure-kv"
 )
 
 type KustomizeDecryptor struct {
 	client.Client
-	kustomization kustomizev1.Kustomization
-	homeDir       string
-	ageIdentities []string
-	vaultToken    string
+
+	kustomization  kustomizev1.Kustomization
+	homeDir        string
+	ageIdentities  []string
+	vaultToken     string
+	azureAADConfig *azkv.AADConfig
 }
 
 func NewDecryptor(kubeClient client.Client,
@@ -169,12 +174,21 @@ func (kd *KustomizeDecryptor) ImportKeys(ctx context.Context) error {
 				}
 			case ".agekey":
 				ageIdentities = append(ageIdentities, string(value))
-			case ".vault-token":
-				// Make sure we have the absolute file name
+			case filepath.Ext(DecryptionVaultTokenFileName):
+				// Make sure we have the absolute name
 				if name == DecryptionVaultTokenFileName {
 					token := string(value)
 					token = strings.Trim(strings.TrimSpace(token), "\n")
 					vaultToken = token
+				}
+			case filepath.Ext(DecryptionAzureAuthFile):
+				// Make sure we have the absolute name
+				if name == DecryptionAzureAuthFile {
+					azureConf := azkv.AADConfig{}
+					if err = azkv.LoadAADConfigFromBytes(value, &azureConf); err != nil {
+						return err
+					}
+					kd.azureAADConfig = &azureConf
 				}
 			}
 		}
@@ -272,7 +286,7 @@ func (kd KustomizeDecryptor) DataWithFormat(data []byte, inputFormat, outputForm
 
 	metadataKey, err := tree.Metadata.GetDataKeyWithKeyServices(
 		[]keyservice.KeyServiceClient{
-			intkeyservice.NewLocalClient(intkeyservice.NewServer(false, kd.homeDir, kd.vaultToken, kd.ageIdentities)),
+			intkeyservice.NewLocalClient(intkeyservice.NewServer(false, kd.homeDir, kd.vaultToken, kd.ageIdentities, kd.azureAADConfig)),
 		},
 	)
 	if err != nil {

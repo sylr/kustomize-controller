@@ -19,14 +19,11 @@ package v1beta2
 import (
 	"time"
 
+	"github.com/fluxcd/pkg/apis/kustomize"
+	"github.com/fluxcd/pkg/apis/meta"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
-	"github.com/fluxcd/pkg/apis/kustomize"
-	"github.com/fluxcd/pkg/apis/meta"
-	"github.com/fluxcd/pkg/runtime/dependency"
 )
 
 const (
@@ -34,15 +31,16 @@ const (
 	KustomizationFinalizer    = "finalizers.fluxcd.io"
 	MaxConditionMessageLength = 20000
 	DisabledValue             = "disabled"
+	MergeValue                = "merge"
 )
 
 // KustomizationSpec defines the configuration to calculate the desired state from a Source using Kustomize.
 type KustomizationSpec struct {
-	// DependsOn may contain a dependency.CrossNamespaceDependencyReference slice
+	// DependsOn may contain a meta.NamespacedObjectReference slice
 	// with references to Kustomization resources that must be ready before this
 	// Kustomization can be reconciled.
 	// +optional
-	DependsOn []dependency.CrossNamespaceDependencyReference `json:"dependsOn,omitempty"`
+	DependsOn []meta.NamespacedObjectReference `json:"dependsOn,omitempty"`
 
 	// Decrypt Kubernetes secrets before applying them on the cluster.
 	// +optional
@@ -244,7 +242,13 @@ type KustomizationStatus struct {
 // KustomizationProgressing resets the conditions of the given Kustomization to a single
 // ReadyCondition with status ConditionUnknown.
 func KustomizationProgressing(k Kustomization, message string) Kustomization {
-	meta.SetResourceCondition(&k, meta.ReadyCondition, metav1.ConditionUnknown, meta.ProgressingReason, message)
+	newCondition := metav1.Condition{
+		Type:    meta.ReadyCondition,
+		Status:  metav1.ConditionUnknown,
+		Reason:  meta.ProgressingReason,
+		Message: trimString(message, MaxConditionMessageLength),
+	}
+	apimeta.SetStatusCondition(k.GetStatusConditions(), newCondition)
 	return k
 }
 
@@ -253,14 +257,27 @@ func SetKustomizationHealthiness(k *Kustomization, status metav1.ConditionStatus
 	if !k.Spec.Wait && len(k.Spec.HealthChecks) == 0 {
 		apimeta.RemoveStatusCondition(k.GetStatusConditions(), HealthyCondition)
 	} else {
-		meta.SetResourceCondition(k, HealthyCondition, status, reason, trimString(message, MaxConditionMessageLength))
+		newCondition := metav1.Condition{
+			Type:    HealthyCondition,
+			Status:  status,
+			Reason:  reason,
+			Message: trimString(message, MaxConditionMessageLength),
+		}
+		apimeta.SetStatusCondition(k.GetStatusConditions(), newCondition)
 	}
 
 }
 
 // SetKustomizationReadiness sets the ReadyCondition, ObservedGeneration, and LastAttemptedRevision, on the Kustomization.
 func SetKustomizationReadiness(k *Kustomization, status metav1.ConditionStatus, reason, message string, revision string) {
-	meta.SetResourceCondition(k, meta.ReadyCondition, status, reason, trimString(message, MaxConditionMessageLength))
+	newCondition := metav1.Condition{
+		Type:    meta.ReadyCondition,
+		Status:  status,
+		Reason:  reason,
+		Message: trimString(message, MaxConditionMessageLength),
+	}
+	apimeta.SetStatusCondition(k.GetStatusConditions(), newCondition)
+
 	k.Status.ObservedGeneration = k.Generation
 	k.Status.LastAttemptedRevision = revision
 }
@@ -311,18 +328,32 @@ func (in Kustomization) GetRetryInterval() time.Duration {
 	if in.Spec.RetryInterval != nil {
 		return in.Spec.RetryInterval.Duration
 	}
+	return in.GetRequeueAfter()
+}
+
+// GetRequeueAfter returns the duration after which the Kustomization must be
+// reconciled again.
+func (in Kustomization) GetRequeueAfter() time.Duration {
 	return in.Spec.Interval.Duration
 }
 
 // GetDependsOn returns the list of dependencies across-namespaces.
-func (in Kustomization) GetDependsOn() (types.NamespacedName, []dependency.CrossNamespaceDependencyReference) {
-	return types.NamespacedName{
-		Namespace: in.Namespace,
-		Name:      in.Name,
-	}, in.Spec.DependsOn
+func (in Kustomization) GetDependsOn() []meta.NamespacedObjectReference {
+	return in.Spec.DependsOn
+}
+
+// GetConditions returns the status conditions of the object.
+func (in Kustomization) GetConditions() []metav1.Condition {
+	return in.Status.Conditions
+}
+
+// SetConditions sets the status conditions on the object.
+func (in *Kustomization) SetConditions(conditions []metav1.Condition) {
+	in.Status.Conditions = conditions
 }
 
 // GetStatusConditions returns a pointer to the Status.Conditions slice.
+// Deprecated: use GetConditions instead.
 func (in *Kustomization) GetStatusConditions() *[]metav1.Condition {
 	return &in.Status.Conditions
 }
@@ -333,9 +364,9 @@ func (in *Kustomization) GetStatusConditions() *[]metav1.Condition {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=ks
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].message",description=""
-// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 
 // Kustomization is the Schema for the kustomizations API.
 type Kustomization struct {

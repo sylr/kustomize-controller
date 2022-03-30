@@ -2,6 +2,77 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.22.3
+
+**Release date:** 2022-03-29
+
+This prerelease fixes a compatability issue between SOPS' Azure Key Vault
+integration, and the controller's. In addition, Kustomize has been updated
+to [`v4.5.4`](https://github.com/kubernetes-sigs/kustomize/releases/tag/kustomize%2Fv4.5.4)
+to address an issue with ConfigMap and Secret generators.
+
+Fixes:
+- sops/azkv: ensure compatibility with upstream
+  [#604](https://github.com/fluxcd/kustomize-controller/pull/604)
+- Update Kustomize to v4.5.4
+  [#606](https://github.com/fluxcd/kustomize-controller/pull/606)
+
+## 0.22.2
+
+**Release date:** 2022-03-25
+
+This prerelease fixes a regression bug where the SOPS keyservice would not
+properly fall back to the default server for Azure Key Vault decryption
+requests.
+
+In addition, Kustomize has been updated to `v4.5.3` to address an issue with
+YAML anchors.
+
+Improvements:
+- Update Kustomize to v4.5.3
+  [#594](https://github.com/fluxcd/kustomize-controller/pull/594)
+- Update source-controller API to v0.22.3
+  [#596](https://github.com/fluxcd/kustomize-controller/pull/596)
+
+Fixes:
+- sops/keyservice: properly fallback to default
+  [#597](https://github.com/fluxcd/kustomize-controller/pull/597)
+
+## 0.22.1
+
+**Release date:** 2022-03-24
+
+This prerelease fixes a regression bug where alerts are sent for every
+reconciliation run.
+
+Fixes:
+- Ensure event annotations are prefixed with Group FQDN
+  [#591](https://github.com/fluxcd/kustomize-controller/pull/591)
+
+## 0.22.0
+
+**Release date:** 2022-03-21
+
+This prerelease introduces a new annotation `kustomize.toolkit.fluxcd.io/ssa: merge`
+for allowing kustomize-controller to patch cluster addons such as CoreDNS without removing
+the kubectl managed fields.
+
+The source-controller dependency was updated to version `v0.22` which 
+introduces API `v1beta2` and deprecates `v1beta1`.
+
+In addition, various dependencies where updated to their latest versions, and
+the code base was refactored to align with `fluxcd/pkg/runtime` v0.13 release.
+
+Improvements:
+- Allow shared ownership of in-cluster objects applied with kubectl
+  [#581](https://github.com/fluxcd/kustomize-controller/pull/581)
+- Update `pkg/runtime` and `apis/meta`
+  [#575](https://github.com/fluxcd/kustomize-controller/pull/575)
+- Update dependencies
+  [#584](https://github.com/fluxcd/kustomize-controller/pull/584)
+- SOPS: Add support for Azure Key Vault credentials
+  [#495](https://github.com/fluxcd/kustomize-controller/pull/495)
+
 ## 0.21.1
 
 **Release date:** 2022-02-23
