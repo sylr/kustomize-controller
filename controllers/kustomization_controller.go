@@ -50,13 +50,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	"sigs.k8s.io/kustomize/kyaml/filesys"
 
 	apiacl "github.com/fluxcd/pkg/apis/acl"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/runtime/acl"
+	runtimeClient "github.com/fluxcd/pkg/runtime/client"
 	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/predicates"
@@ -88,6 +89,7 @@ type KustomizationReconciler struct {
 	statusManager         string
 	NoCrossNamespaceRefs  bool
 	DefaultServiceAccount string
+	KubeConfigOpts        runtimeClient.KubeConfigOptions
 }
 
 // KustomizationReconcilerOptions contains options for the KustomizationReconciler.
@@ -95,6 +97,7 @@ type KustomizationReconcilerOptions struct {
 	MaxConcurrentReconciles   int
 	HTTPRetry                 int
 	DependencyRequeueInterval time.Duration
+	RateLimiter               ratelimiter.RateLimiter
 }
 
 func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts KustomizationReconcilerOptions) error {
@@ -141,7 +144,10 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(bucketIndexKey)),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
-		WithOptions(controller.Options{MaxConcurrentReconciles: opts.MaxConcurrentReconciles}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: opts.MaxConcurrentReconciles,
+			RateLimiter:             opts.RateLimiter,
+		}).
 		Complete(r)
 }
 
@@ -299,7 +305,7 @@ func (r *KustomizationReconciler) reconcile(
 	revision := source.GetArtifact().Revision
 
 	// create tmp dir
-	tmpDir, err := os.MkdirTemp("", kustomization.Name)
+	tmpDir, err := MkdirTempAbs("", "kustomization-")
 	if err != nil {
 		err = fmt.Errorf("tmp dir error: %w", err)
 		return kustomizev1.KustomizationNotReady(
@@ -343,7 +349,7 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// setup the Kubernetes client for impersonation
-	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount)
+	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts)
 	kubeClient, statusPoller, err := impersonation.GetClient(ctx)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
@@ -355,7 +361,7 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// generate kustomization.yaml if needed
-	err = r.generate(kustomization, dirPath)
+	err = r.generate(kustomization, tmpDir, dirPath)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
 			kustomization,
@@ -366,7 +372,7 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// build the kustomization
-	resources, err := r.build(ctx, kustomization, dirPath)
+	resources, err := r.build(ctx, tmpDir, kustomization, dirPath)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
 			kustomization,
@@ -627,31 +633,29 @@ func (r *KustomizationReconciler) getSource(ctx context.Context, kustomization k
 	return source, nil
 }
 
-func (r *KustomizationReconciler) generate(kustomization kustomizev1.Kustomization, dirPath string) error {
-	gen := NewGenerator(kustomization)
+func (r *KustomizationReconciler) generate(kustomization kustomizev1.Kustomization, workDir string, dirPath string) error {
+	gen := NewGenerator(workDir, kustomization)
 	return gen.WriteFile(dirPath)
 }
 
-func (r *KustomizationReconciler) build(ctx context.Context, kustomization kustomizev1.Kustomization, dirPath string) ([]byte, error) {
-	dec, cleanup, err := NewTempDecryptor(r.Client, kustomization)
+func (r *KustomizationReconciler) build(ctx context.Context, workDir string, kustomization kustomizev1.Kustomization, dirPath string) ([]byte, error) {
+	dec, cleanup, err := NewTempDecryptor(workDir, r.Client, kustomization)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
 
-	// import OpenPGP keys if any
+	// Import decryption keys
 	if err := dec.ImportKeys(ctx); err != nil {
 		return nil, err
 	}
 
-	fs := filesys.MakeFsOnDisk()
-	// decrypt .env files before building kustomization
-	if kustomization.Spec.Decryption != nil {
-		if err = dec.decryptDotEnvFiles(dirPath); err != nil {
-			return nil, fmt.Errorf("error decrypting .env file: %w", err)
-		}
+	// Decrypt Kustomize EnvSources files before build
+	if err = dec.DecryptEnvSources(dirPath); err != nil {
+		return nil, fmt.Errorf("error decrypting env sources: %w", err)
 	}
-	m, err := buildKustomization(fs, dirPath)
+
+	m, err := secureBuildKustomization(workDir, dirPath)
 	if err != nil {
 		return nil, fmt.Errorf("kustomize build failed: %w", err)
 	}
@@ -664,7 +668,7 @@ func (r *KustomizationReconciler) build(ctx context.Context, kustomization kusto
 
 		// check if resources are encrypted and decrypt them before generating the final YAML
 		if kustomization.Spec.Decryption != nil {
-			outRes, err := dec.Decrypt(res)
+			outRes, err := dec.DecryptResource(res)
 			if err != nil {
 				return nil, fmt.Errorf("decryption failed for '%s': %w", res.GetName(), err)
 			}
@@ -926,7 +930,7 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 		kustomization.Status.Inventory.Entries != nil {
 		objects, _ := ListObjectsInInventory(kustomization.Status.Inventory)
 
-		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount)
+		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts)
 		if impersonation.CanFinalize(ctx) {
 			kubeClient, _, err := impersonation.GetClient(ctx)
 			if err != nil {

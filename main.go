@@ -27,11 +27,13 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/azure"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
+	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/engine"
 	ctrl "sigs.k8s.io/controller-runtime"
 	crtlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/fluxcd/pkg/runtime/acl"
 	"github.com/fluxcd/pkg/runtime/client"
+	helper "github.com/fluxcd/pkg/runtime/controller"
 	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/leaderelection"
 	"github.com/fluxcd/pkg/runtime/logger"
@@ -42,6 +44,7 @@ import (
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	"github.com/fluxcd/kustomize-controller/controllers"
+	"github.com/fluxcd/kustomize-controller/internal/statusreaders"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -68,8 +71,10 @@ func main() {
 		concurrent            int
 		requeueDependency     time.Duration
 		clientOptions         client.Options
+		kubeConfigOpts        client.KubeConfigOptions
 		logOptions            logger.Options
 		leaderElectionOptions leaderelection.Options
+		rateLimiterOptions    helper.RateLimiterOptions
 		aclOptions            acl.Options
 		watchAllNamespaces    bool
 		httpRetry             int
@@ -89,6 +94,8 @@ func main() {
 	logOptions.BindFlags(flag.CommandLine)
 	leaderElectionOptions.BindFlags(flag.CommandLine)
 	aclOptions.BindFlags(flag.CommandLine)
+	kubeConfigOpts.BindFlags(flag.CommandLine)
+	rateLimiterOptions.BindFlags(flag.CommandLine)
 	flag.Parse()
 
 	ctrl.SetLogger(logger.NewLogger(logOptions))
@@ -130,6 +137,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	jobStatusReader := statusreaders.NewCustomJobStatusReader(mgr.GetRESTMapper())
 	if err = (&controllers.KustomizationReconciler{
 		ControllerName:        controllerName,
 		DefaultServiceAccount: defaultServiceAccount,
@@ -137,12 +145,16 @@ func main() {
 		Scheme:                mgr.GetScheme(),
 		EventRecorder:         eventRecorder,
 		MetricsRecorder:       metricsRecorder,
-		StatusPoller:          polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), polling.Options{}),
 		NoCrossNamespaceRefs:  aclOptions.NoCrossNamespaceRefs,
+		KubeConfigOpts:        kubeConfigOpts,
+		StatusPoller: polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), polling.Options{
+			CustomStatusReaders: []engine.StatusReader{jobStatusReader},
+		}),
 	}).SetupWithManager(mgr, controllers.KustomizationReconcilerOptions{
 		MaxConcurrentReconciles:   concurrent,
 		DependencyRequeueInterval: requeueDependency,
 		HTTPRetry:                 httpRetry,
+		RateLimiter:               helper.GetRateLimiter(rateLimiterOptions),
 	}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", controllerName)
 		os.Exit(1)

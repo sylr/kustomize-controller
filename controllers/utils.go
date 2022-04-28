@@ -1,6 +1,3 @@
-//go:build gofuzz
-// +build gofuzz
-
 /*
 Copyright 2022 The Flux authors
 
@@ -17,35 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package age
+package controllers
 
 import (
-	fuzz "github.com/AdaLogics/go-fuzz-headers"
+	"fmt"
+	"os"
+	"path/filepath"
 )
 
-// FuzzAge implements a fuzzer that targets functions within age/keysource.go.
-func FuzzAge(data []byte) int {
-	f := fuzz.NewConsumer(data)
-	masterKey := MasterKey{}
-
-	if err := f.GenerateStruct(&masterKey); err != nil {
-		return 0
-	}
-
-	_ = masterKey.Encrypt(data)
-	_ = masterKey.EncryptIfNeeded(data)
-
-	receipt, err := f.GetString()
+// MkdirTempAbs creates a tmp dir and returns the absolute path to the dir.
+// This is required since certain OSes like MacOS create temporary files in
+// e.g. `/private/var`, to which `/var` is a symlink.
+func MkdirTempAbs(dir, pattern string) (string, error) {
+	tmpDir, err := os.MkdirTemp(dir, pattern)
 	if err != nil {
-		return 0
+		return "", err
 	}
-	_, _ = MasterKeyFromRecipient(receipt)
-
-	identities, err := f.GetString()
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
 	if err != nil {
-		return 0
+		return "", fmt.Errorf("error evaluating symlink: %w", err)
 	}
-	_, _ = MasterKeyFromIdentities(identities)
-
-	return 1
+	return tmpDir, nil
 }

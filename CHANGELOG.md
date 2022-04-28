@@ -2,6 +2,104 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.24.3
+
+**Release date:** 2022-04-22
+
+This prerelease allows for configuring the exponential back-off retry, already
+introduced in other Flux controllers. It can be configured with the new flags:
+`--min-retry-delay` (default: `750ms`) and `--max-retry-delay`
+(default: `15min`). Previously the defaults were set to `5ms` and `1000s`.
+
+Fixes:
+- Ensure generated temp dir is absolute on all OSes
+  [#630](https://github.com/fluxcd/kustomize-controller/pull/630)
+
+Improvements:
+- feat: flags to configure exponential backoff retry
+  [#631](https://github.com/fluxcd/kustomize-controller/pull/631)
+- Update source-controller to v0.24.1
+  [#632](https://github.com/fluxcd/kustomize-controller/pull/632)
+
+## 0.24.2
+
+**Release date:** 2022-04-21
+
+This prerelease updates the Go `golang.org/x/crypto` dependency to latest to
+please static security analysers (CVE-2022-27191).
+
+Fixes:
+- Update golang.org/x/crypto
+  [#628](https://github.com/fluxcd/kustomize-controller/pull/628)
+
+## 0.24.1
+
+**Release date:** 2022-04-20
+
+This prerelease fixes a regression bug introduced in
+[#620](https://github.com/fluxcd/kustomize-controller/pull/620), which
+prevented remote build directories from being reachable within the FS.
+
+Fixes:
+- generator: ensure remote build dirs can be reached
+  [#626](https://github.com/fluxcd/kustomize-controller/pull/626)
+
+## 0.24.0
+
+**Release date:** 2022-04-19
+
+This prerelease matures the Kustomize decryptor service, which handles the
+actual decryption of SOPS' encrypted Secrets, and now allows decrypting
+[file sources](https://pkg.go.dev/sigs.k8s.io/kustomize@v1.0.2/pkg/types#DataSources)
+referenced in Kustomization files.
+
+In addition, Kustomize now operates using our own file system implementation,
+and dependencies have been updated to their latest versions.
+
+Improvements:
+- controllers: improve decryptor and add tests
+  [#619](https://github.com/fluxcd/kustomize-controller/pull/619)
+- controllers: use own Kustomize FS implementation
+  [#620](https://github.com/fluxcd/kustomize-controller/pull/620)
+- Update dependencies
+  [#621](https://github.com/fluxcd/kustomize-controller/pull/621)
+  [#622](https://github.com/fluxcd/kustomize-controller/pull/622)
+
+## 0.23.0
+
+**Release date:** 2022-04-05
+
+This prerelease adds some breaking changes around the use and handling of kubeconfigs 
+files for remote reconciliations. Implements health checks for kubernetes jobs and 
+updates documentation.
+
+SOPS implementation was refactored to include various improvements and extended code
+coverage. Age identities are now imported once and reused multiple times, optimising
+CPU and memory usage between decryption operations.
+
+**Breaking changes**:
+
+- Use of file-based KubeConfig options are now permanently disabled (e.g. 
+`TLSClientConfig.CAFile`, `TLSClientConfig.KeyFile`, `TLSClientConfig.CertFile`
+and `BearerTokenFile`). The drive behind the change was to discourage
+insecure practices of mounting Kubernetes tokens inside the controller's container file system.
+- Use of `TLSClientConfig.Insecure` in KubeConfig file is disabled by default,
+but can enabled at controller level with the flag `--insecure-kubeconfig-tls`.
+- Use of `ExecProvider` in KubeConfig file is now disabled by default,
+but can enabled at controller level with the flag `--insecure-kubeconfig-exec`.
+
+Improvements:
+- Add kubeconfig flags
+  [#593](https://github.com/fluxcd/kustomize-controller/pull/593)
+- sops: various improvements and tests
+  [#607](https://github.com/fluxcd/kustomize-controller/pull/607)
+- docs/spec/v1beta2: fix recommended settings typo
+  [#609](https://github.com/fluxcd/kustomize-controller/pull/609)
+- Implement health check for Kubernetes jobs
+  [#608](https://github.com/fluxcd/kustomize-controller/pull/608)
+- Update KubeConfig documentation
+  [#611](https://github.com/fluxcd/kustomize-controller/pull/611)
+
 ## 0.22.3
 
 **Release date:** 2022-03-29
@@ -1209,7 +1307,7 @@ using the [notification.fluxcd.io API](https://github.com/fluxcd/notification-co
 **Release date:** 2020-06-24
 
 This is the first prerelease ready for public testing. To get started
-testing, see the [GitOps Toolkit guide](https://toolkit.fluxcd.io/get-started/).
+testing, see the [GitOps Toolkit guide](https://fluxcd.io/docs/get-started/).
 
 ## 0.0.1-beta.2
 
