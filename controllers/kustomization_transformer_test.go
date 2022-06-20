@@ -74,7 +74,7 @@ func TestKustomizationReconciler_KustomizeTransformer(t *testing.T) {
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
 			KubeConfig: &kustomizev1.KubeConfig{
-				SecretRef: meta.LocalObjectReference{
+				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -197,7 +197,7 @@ func TestKustomizationReconciler_KustomizeTransformerFiles(t *testing.T) {
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
 			KubeConfig: &kustomizev1.KubeConfig{
-				SecretRef: meta.LocalObjectReference{
+				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -316,7 +316,7 @@ func TestKustomizationReconciler_FluxTransformers(t *testing.T) {
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
 			KubeConfig: &kustomizev1.KubeConfig{
-				SecretRef: meta.LocalObjectReference{
+				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -331,6 +331,10 @@ func TestKustomizationReconciler_FluxTransformers(t *testing.T) {
 					Name:    "podinfo",
 					NewName: "ghcr.io/stefanprodan/podinfo",
 					NewTag:  "5.2.0",
+				},
+				{
+					Name:   "ghcr.io/fluxcd/flagger",
+					Digest: "sha256:2832f53c577d44753e97b0ed5f00e7e3a06979c9fab77d0e78bdac4b612b14fb",
 				},
 			},
 			Patches: []kustomize.Patch{
@@ -394,6 +398,8 @@ metadata:
 		g.Expect(deployment.ObjectMeta.Labels["patch3"]).To(Equal("json6902"))
 		g.Expect(deployment.ObjectMeta.Labels["patch4"]).To(Equal("strategic-merge"))
 		g.Expect(*deployment.Spec.Replicas).To(Equal(int32(2)))
+		g.Expect(deployment.Spec.Template.Spec.Containers[0].Image).To(ContainSubstring("5.2.0"))
+		g.Expect(deployment.Spec.Template.Spec.Containers[1].Image).To(ContainSubstring("sha256:2832f53c577d44753e97b0ed5f00e7e3a06979c9fab77d0e78bdac4b612b14fb"))
 	})
 }
 

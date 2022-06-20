@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 
+	"sigs.k8s.io/kustomize/api/filesys"
 	"sigs.k8s.io/kustomize/api/konfig"
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/provider"
@@ -103,6 +104,7 @@ func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
 			Name:    image.Name,
 			NewName: image.NewName,
 			NewTag:  image.NewTag,
+			Digest:  image.Digest,
 		}
 		if exists, index := checkKustomizeImageExists(kus.Images, image.Name); exists {
 			kus.Images[index] = newImage
@@ -115,7 +117,6 @@ func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
 	if err != nil {
 		return err
 	}
-
 	return os.WriteFile(kfile, kd, os.ModePerm)
 }
 
@@ -247,11 +248,20 @@ var kustomizeBuildMutex sync.Mutex
 //  - load files from outside the kustomization dir path
 //    (but not outside root)
 //  - disable plugins except for the builtin ones
-func secureBuildKustomization(root, dirPath string) (_ resmap.ResMap, err error) {
-	// Create secure FS for root
-	fs, err := securefs.MakeFsOnDiskSecureBuild(root)
-	if err != nil {
-		return nil, err
+func secureBuildKustomization(root, dirPath string, allowRemoteBases bool) (_ resmap.ResMap, err error) {
+	var fs filesys.FileSystem
+
+	// Create secure FS for root with or without remote base support
+	if allowRemoteBases {
+		fs, err = securefs.MakeFsOnDiskSecureBuild(root)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		fs, err = securefs.MakeFsOnDiskSecure(root)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Temporary workaround for concurrent map read and map write bug

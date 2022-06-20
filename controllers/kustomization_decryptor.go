@@ -47,6 +47,7 @@ import (
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	"github.com/fluxcd/kustomize-controller/internal/sops/age"
+	"github.com/fluxcd/kustomize-controller/internal/sops/awskms"
 	"github.com/fluxcd/kustomize-controller/internal/sops/azkv"
 	intkeyservice "github.com/fluxcd/kustomize-controller/internal/sops/keyservice"
 	"github.com/fluxcd/kustomize-controller/internal/sops/pgp"
@@ -64,15 +65,24 @@ const (
 	// DecryptionVaultTokenFileName is the name of the file containing the
 	// Hashicorp Vault token.
 	DecryptionVaultTokenFileName = "sops.vault-token"
+	// DecryptionAWSKmsFile is the name of the file containing the AWS KMS
+	// credentials.
+	DecryptionAWSKmsFile = "sops.aws-kms"
 	// DecryptionAzureAuthFile is the name of the file containing the Azure
 	// credentials.
 	DecryptionAzureAuthFile = "sops.azure-kv"
-)
-
-var (
+	// DecryptionGCPCredsFile is the name of the file containing the GCP
+	// credentials.
+	DecryptionGCPCredsFile = "sops.gcp-kms"
 	// maxEncryptedFileSize is the max allowed file size in bytes of an encrypted
 	// file.
 	maxEncryptedFileSize int64 = 5 << 20
+	// unsupportedFormat is used to signal no sopsFormatToMarkerBytes format was
+	// detected by detectFormatFromMarkerBytes.
+	unsupportedFormat = formats.Format(-1)
+)
+
+var (
 	// sopsFormatToString is the counterpart to
 	// https://github.com/mozilla/sops/blob/v3.7.2/cmd/sops/formats/formats.go#L16
 	sopsFormatToString = map[formats.Format]string{
@@ -125,9 +135,15 @@ type KustomizeDecryptor struct {
 	// vaultToken is the Hashicorp Vault token used to authenticate towards
 	// any Vault server.
 	vaultToken string
+	// awsCredsProvider is the AWS credentials provider object used to authenticate
+	// towards any AWS KMS.
+	awsCredsProvider *awskms.CredsProvider
 	// azureToken is the Azure credential token used to authenticate towards
 	// any Azure Key Vault.
 	azureToken *azkv.Token
+	// gcpCredsJSON is the JSON credential file of the service account used to
+	// authenticate towards any GCP KMS.
+	gcpCredsJSON []byte
 
 	// keyServices are the SOPS keyservice.KeyServiceClient's available to the
 	// decryptor.
@@ -216,6 +232,12 @@ func (d *KustomizeDecryptor) ImportKeys(ctx context.Context) error {
 					token = strings.Trim(strings.TrimSpace(token), "\n")
 					d.vaultToken = token
 				}
+			case filepath.Ext(DecryptionAWSKmsFile):
+				if name == DecryptionAWSKmsFile {
+					if d.awsCredsProvider, err = awskms.LoadCredsProviderFromYaml(value); err != nil {
+						return fmt.Errorf("failed to import '%s' data from %s decryption Secret '%s': %w", name, provider, secretName, err)
+					}
+				}
 			case filepath.Ext(DecryptionAzureAuthFile):
 				// Make sure we have the absolute name
 				if name == DecryptionAzureAuthFile {
@@ -226,6 +248,10 @@ func (d *KustomizeDecryptor) ImportKeys(ctx context.Context) error {
 					if d.azureToken, err = azkv.TokenFromAADConfig(conf); err != nil {
 						return fmt.Errorf("failed to import '%s' data from %s decryption Secret '%s': %w", name, provider, secretName, err)
 					}
+				}
+			case filepath.Ext(DecryptionGCPCredsFile):
+				if name == DecryptionGCPCredsFile {
+					d.gcpCredsJSON = bytes.Trim(value, "\n")
 				}
 			}
 		}
@@ -334,9 +360,9 @@ func (d *KustomizeDecryptor) DecryptResource(res *resource.Resource) (*resource.
 					continue
 				}
 
-				if bytes.Contains(data, sopsFormatToMarkerBytes[formats.Yaml]) || bytes.Contains(data, sopsFormatToMarkerBytes[formats.Json]) {
-					outF := formats.FormatForPath(key)
-					out, err := d.SopsDecryptWithFormat(data, formats.Yaml, outF)
+				if inF := detectFormatFromMarkerBytes(data); inF != unsupportedFormat {
+					outF := formatForPath(key)
+					out, err := d.SopsDecryptWithFormat(data, inF, outF)
 					if err != nil {
 						return nil, fmt.Errorf("failed to decrypt and format '%s/%s' Secret field '%s': %w",
 							res.GetNamespace(), res.GetName(), key, err)
@@ -406,13 +432,13 @@ func (d *KustomizeDecryptor) decryptKustomizationEnvSources(visited map[string]s
 				} else {
 					filePath = key
 				}
-				if err := visitRef(filePath, formats.FormatForPath(key)); err != nil {
+				if err := visitRef(filePath, formatForPath(key)); err != nil {
 					return err
 				}
 			}
 			for _, envFile := range gen.EnvSources {
-				format := formats.FormatForPath(envFile)
-				if formats.FormatForPath(envFile) == formats.Binary {
+				format := formatForPath(envFile)
+				if format == formats.Binary {
 					// Default to dotenv
 					format = formats.Dotenv
 				}
@@ -526,12 +552,14 @@ func (d *KustomizeDecryptor) loadKeyServiceServers() {
 		intkeyservice.WithGnuPGHome(d.gnuPGHome),
 		intkeyservice.WithVaultToken(d.vaultToken),
 		intkeyservice.WithAgeIdentities(d.ageIdentities),
+		intkeyservice.WithGCPCredsJSON(d.gcpCredsJSON),
 	}
 	if d.azureToken != nil {
 		serverOpts = append(serverOpts, intkeyservice.WithAzureToken{Token: d.azureToken})
 	}
+	serverOpts = append(serverOpts, intkeyservice.WithAWSKeys{CredsProvider: d.awsCredsProvider})
 	server := intkeyservice.NewServer(serverOpts...)
-	d.keyServices = append(make([]keyservice.KeyServiceClient, 0), intkeyservice.NewLocalClient(server))
+	d.keyServices = append(make([]keyservice.KeyServiceClient, 0), keyservice.NewCustomLocalClient(server))
 }
 
 // secureLoadKustomizationFile tries to securely load a Kustomization file from
@@ -730,4 +758,22 @@ func securePathErr(root string, err error) error {
 		err = &fs.PathError{Op: pathErr.Op, Path: stripRoot(root, pathErr.Path), Err: pathErr.Err}
 	}
 	return err
+}
+
+func formatForPath(path string) formats.Format {
+	switch {
+	case strings.HasSuffix(path, corev1.DockerConfigJsonKey):
+		return formats.Json
+	default:
+		return formats.FormatForPath(path)
+	}
+}
+
+func detectFormatFromMarkerBytes(b []byte) formats.Format {
+	for k, v := range sopsFormatToMarkerBytes {
+		if bytes.Contains(b, v) {
+			return k
+		}
+	}
+	return unsupportedFormat
 }

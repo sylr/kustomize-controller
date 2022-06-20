@@ -1,18 +1,8 @@
-/*
-Copyright 2022 The Flux authors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright (C) 2022 The Flux authors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package hcvault
 
@@ -60,6 +50,12 @@ func TestMain(m *testing.M) {
 		logger.Fatalf("could not start resource: %s", err)
 	}
 
+	purgeResource := func() {
+		if err := pool.Purge(resource); err != nil {
+			logger.Printf("could not purge resource: %s", err)
+		}
+	}
+
 	testVaultAddress = fmt.Sprintf("http://127.0.0.1:%v", resource.GetPort("8200/tcp"))
 	// Wait until Vault is ready to serve requests
 	if err := pool.Retry(func() error {
@@ -78,10 +74,12 @@ func TestMain(m *testing.M) {
 		}
 		return nil
 	}); err != nil {
+		purgeResource()
 		logger.Fatalf("could not connect to docker: %s", err)
 	}
 
 	if err = enableVaultTransit(testVaultAddress, testVaultToken, testEnginePath); err != nil {
+		purgeResource()
 		logger.Fatalf("could not enable Vault transit: %s", err)
 	}
 

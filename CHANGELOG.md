@@ -2,6 +2,91 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.26.1
+
+**Release date:** 2022-06-08
+
+This prerelease comes with documentation improvements on how to generate
+image pull secrets from SOPS encrypted `.dockerconfigjson` files.
+
+In addition, the controller has been updated to Kubernetes v1.24.1.
+
+Improvements:
+- docs: Add example section and dockerconfigjson encryption
+  [#675](https://github.com/fluxcd/kustomize-controller/pull/675)
+- Update dependencies
+  [#676](https://github.com/fluxcd/kustomize-controller/pull/676)
+- Update fluxcd/pkg dependencies
+  [#677](https://github.com/fluxcd/kustomize-controller/pull/677)
+
+## 0.26.0
+
+**Release date:** 2022-06-01
+
+This prerelease comes with support for configuring the authentication to
+AWS KMS, Azure Key Vault and GCP KMS on multi-tenant clusters.
+A tenant can create a secret in their namespace with their KMS credentials
+and supply it to Flux using `Kustomization.spec.decryption.secretRef`.
+For more details on how to configure SOPS decryption with KMS, see the
+[docs](https://github.com/fluxcd/kustomize-controller/blob/v0.26.0/docs/spec/v1beta2/kustomization.md#secrets-decryption).
+
+Starting with this version, the controller conforms to the Kubernetes
+[API Priority and Fairness](https://kubernetes.io/docs/concepts/cluster-administration/flow-control/).
+The controller detects if the server-side throttling is enabled and uses the
+advertised rate limits. When server-side throttling is enabled, the controller
+ignores the `--kube-api-qps` and `--kube-api-burst` flags.
+
+In addition, Kustomize has been updated
+to [`v4.5.5`](https://github.com/kubernetes-sigs/kustomize/releases/tag/kustomize%2Fv4.5.5) 
+which comes with significant performance improvements for OpenAPI parsing.
+
+Improvements:
+- Support AWS KMS credentials using decryption secretRef
+  [#641](https://github.com/fluxcd/kustomize-controller/pull/641)
+  [#667](https://github.com/fluxcd/kustomize-controller/pull/667)
+- Support GCP KMS credentials using decryption secretRef
+  [#635](https://github.com/fluxcd/kustomize-controller/pull/635)
+- Update SOPS to v3.7.3
+  [#647](https://github.com/fluxcd/kustomize-controller/pull/647)
+- Update controller to kustomize v4.5.5
+  [#660](https://github.com/fluxcd/kustomize-controller/pull/660)
+- Update dependencies
+  [#650](https://github.com/fluxcd/kustomize-controller/pull/650)
+- Update Alpine to v3.16
+  [#661](https://github.com/fluxcd/kustomize-controller/pull/661)
+- Update go-yaml to v3.0.0
+  [#665](https://github.com/fluxcd/kustomize-controller/pull/665)
+- Update source-controller/api to v0.25.0
+  [#671](https://github.com/fluxcd/kustomize-controller/pull/671)
+
+Fixes:
+- Set digests in image override
+  [#655](https://github.com/fluxcd/kustomize-controller/pull/655)
+
+## 0.25.0
+
+**Release date:** 2022-05-03
+
+This prerelease adds support for disallowing remote bases in Kustomize overlays
+using `--no-remote-bases=true` (default: `false`).  When this flag is enabled on
+the controller, all resources must refer to local files included in the Source
+Artifact, meaning only the Flux Sources can affect the cluster-state. Users
+are encouraged to enable it on production systems for security and performance
+reasons.
+
+In addition, support has been introduced for defining a KubeConfig Secret data
+key in the `.spec.kubeConfig.SecretRef.key` (default: `value` or `value.yaml`),
+and dependencies have been updated.
+
+Improvements:
+- Support defining a KubeConfig Secret data key
+  [#615](https://github.com/fluxcd/kustomize-controller/pull/615)
+  [#645](https://github.com/fluxcd/kustomize-controller/pull/645)
+- Disallow remote bases usage in Kustomize overlays
+  [#638](https://github.com/fluxcd/kustomize-controller/pull/638)
+- decryptor: improve detection of in and out formats for Secret data fields
+  [#644](https://github.com/fluxcd/kustomize-controller/pull/644)
+
 ## 0.24.4
 
 **Release date:** 2022-04-28

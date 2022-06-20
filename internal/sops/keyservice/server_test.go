@@ -1,18 +1,8 @@
-/*
-Copyright 2022 The Flux authors
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// Copyright (C) 2022 The Flux authors
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 package keyservice
 
@@ -22,12 +12,15 @@ import (
 	"testing"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	. "github.com/onsi/gomega"
 	"go.mozilla.org/sops/v3/keyservice"
 	"golang.org/x/net/context"
 
 	"github.com/fluxcd/kustomize-controller/internal/sops/age"
+	"github.com/fluxcd/kustomize-controller/internal/sops/awskms"
 	"github.com/fluxcd/kustomize-controller/internal/sops/azkv"
+	"github.com/fluxcd/kustomize-controller/internal/sops/gcpkms"
 	"github.com/fluxcd/kustomize-controller/internal/sops/hcvault"
 	"github.com/fluxcd/kustomize-controller/internal/sops/pgp"
 )
@@ -136,7 +129,6 @@ func TestServer_EncryptDecrypt_HCVault_Fallback(t *testing.T) {
 
 	fallback = NewMockKeyServer()
 	s = NewServer(WithDefaultServer{Server: fallback})
-
 	decReq := &keyservice.DecryptRequest{
 		Key:        &key,
 		Ciphertext: []byte("some ciphertext"),
@@ -145,6 +137,26 @@ func TestServer_EncryptDecrypt_HCVault_Fallback(t *testing.T) {
 	g.Expect(fallback.decryptReqs).To(HaveLen(1))
 	g.Expect(fallback.decryptReqs).To(ContainElement(decReq))
 	g.Expect(fallback.encryptReqs).To(HaveLen(0))
+}
+
+func TestServer_EncryptDecrypt_awskms(t *testing.T) {
+	g := NewWithT(t)
+	s := NewServer(WithAWSKeys{
+		CredsProvider: awskms.NewCredsProvider(credentials.StaticCredentialsProvider{}),
+	})
+
+	key := KeyFromMasterKey(awskms.NewMasterKeyFromArn("arn:aws:kms:us-west-2:107501996527:key/612d5f0p-p1l3-45e6-aca6-a5b005693a48", nil, ""))
+	_, err := s.Encrypt(context.TODO(), &keyservice.EncryptRequest{
+		Key: &key,
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to encrypt sops data key with AWS KMS"))
+
+	_, err = s.Decrypt(context.TODO(), &keyservice.DecryptRequest{
+		Key: &key,
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to decrypt sops data key with AWS KMS"))
 }
 
 func TestServer_EncryptDecrypt_azkv(t *testing.T) {
@@ -197,6 +209,30 @@ func TestServer_EncryptDecrypt_azkv_Fallback(t *testing.T) {
 	g.Expect(fallback.decryptReqs).To(HaveLen(1))
 	g.Expect(fallback.decryptReqs).To(ContainElement(decReq))
 	g.Expect(fallback.encryptReqs).To(HaveLen(0))
+}
+
+func TestServer_EncryptDecrypt_gcpkms(t *testing.T) {
+	g := NewWithT(t)
+
+	creds := `{ "client_id": "<client-id>.apps.googleusercontent.com",
+ 		"client_secret": "<secret>",
+		"type": "authorized_user"}`
+	s := NewServer(WithGCPCredsJSON([]byte(creds)))
+
+	resourceID := "projects/test-flux/locations/global/keyRings/test-flux/cryptoKeys/sops"
+	key := KeyFromMasterKey(gcpkms.MasterKeyFromResourceID(resourceID))
+	_, err := s.Encrypt(context.TODO(), &keyservice.EncryptRequest{
+		Key: &key,
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to encrypt sops data key with GCP KMS"))
+
+	_, err = s.Decrypt(context.TODO(), &keyservice.DecryptRequest{
+		Key: &key,
+	})
+	g.Expect(err).To(HaveOccurred())
+	g.Expect(err.Error()).To(ContainSubstring("failed to decrypt sops data key with GCP KMS"))
+
 }
 
 func TestServer_EncryptDecrypt_Nil_KeyType(t *testing.T) {
