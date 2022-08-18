@@ -19,19 +19,13 @@ package controllers
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
-	"crypto/sha256"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
 	"time"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
-	"github.com/hashicorp/go-retryablehttp"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -62,7 +56,6 @@ import (
 	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/predicates"
 	"github.com/fluxcd/pkg/ssa"
-	"github.com/fluxcd/pkg/untar"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
@@ -71,20 +64,21 @@ import (
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations/finalizers,verbs=get;create;update;patch;delete
-// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=buckets;gitrepositories,verbs=get;list;watch
-// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=buckets/status;gitrepositories/status,verbs=get
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=buckets;ocirepositories;gitrepositories,verbs=get;list;watch
+// +kubebuilder:rbac:groups=source.toolkit.fluxcd.io,resources=buckets/status;ocirepositories/status;gitrepositories/status,verbs=get
 // +kubebuilder:rbac:groups="",resources=configmaps;secrets;serviceaccounts,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // KustomizationReconciler reconciles a Kustomization object
 type KustomizationReconciler struct {
 	client.Client
-	httpClient            *retryablehttp.Client
+	artifactFetcher       *ArtifactFetcher
 	requeueDependency     time.Duration
 	Scheme                *runtime.Scheme
 	EventRecorder         kuberecorder.EventRecorder
 	MetricsRecorder       *metrics.Recorder
 	StatusPoller          *polling.StatusPoller
+	PollingOpts           polling.Options
 	ControllerName        string
 	statusManager         string
 	NoCrossNamespaceRefs  bool
@@ -103,9 +97,16 @@ type KustomizationReconcilerOptions struct {
 
 func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts KustomizationReconcilerOptions) error {
 	const (
+		ociRepositoryIndexKey string = ".metadata.ociRepository"
 		gitRepositoryIndexKey string = ".metadata.gitRepository"
 		bucketIndexKey        string = ".metadata.bucket"
 	)
+
+	// Index the Kustomizations by the OCIRepository references they (may) point at.
+	if err := mgr.GetCache().IndexField(context.TODO(), &kustomizev1.Kustomization{}, ociRepositoryIndexKey,
+		r.indexBy(sourcev1.OCIRepositoryKind)); err != nil {
+		return fmt.Errorf("failed setting index fields: %w", err)
+	}
 
 	// Index the Kustomizations by the GitRepository references they (may) point at.
 	if err := mgr.GetCache().IndexField(context.TODO(), &kustomizev1.Kustomization{}, gitRepositoryIndexKey,
@@ -121,20 +122,17 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 
 	r.requeueDependency = opts.DependencyRequeueInterval
 	r.statusManager = fmt.Sprintf("gotk-%s", r.ControllerName)
-
-	// Configure the retryable http client used for fetching artifacts.
-	// By default it retries 10 times within a 3.5 minutes window.
-	httpClient := retryablehttp.NewClient()
-	httpClient.RetryWaitMin = 5 * time.Second
-	httpClient.RetryWaitMax = 30 * time.Second
-	httpClient.RetryMax = opts.HTTPRetry
-	httpClient.Logger = nil
-	r.httpClient = httpClient
+	r.artifactFetcher = NewArtifactFetcher(opts.HTTPRetry)
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kustomizev1.Kustomization{}, builder.WithPredicates(
 			predicate.Or(predicate.GenerationChangedPredicate{}, predicates.ReconcileRequestedPredicate{}),
 		)).
+		Watches(
+			&source.Kind{Type: &sourcev1.OCIRepository{}},
+			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(ociRepositoryIndexKey)),
+			builder.WithPredicates(SourceRevisionChangePredicate{}),
+		).
 		Watches(
 			&source.Kind{Type: &sourcev1.GitRepository{}},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(gitRepositoryIndexKey)),
@@ -267,6 +265,18 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// reconcile kustomization by applying the latest revision
 	reconciledKustomization, reconcileErr := r.reconcile(ctx, *kustomization.DeepCopy(), source)
+
+	// requeue if the artifact is not found
+	if reconcileErr == ArtifactNotFoundError {
+		msg := fmt.Sprintf("Source is not ready, artifact not found, retrying in %s", r.requeueDependency.String())
+		log.Info(msg)
+		if err := r.patchStatus(ctx, req, kustomizev1.KustomizationProgressing(kustomization, msg).Status); err != nil {
+			log.Error(err, "unable to update status for artifact not found")
+			return ctrl.Result{Requeue: true}, err
+		}
+		return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
+	}
+
 	if err := r.patchStatus(ctx, req, reconciledKustomization.Status); err != nil {
 		return ctrl.Result{Requeue: true}, err
 	}
@@ -319,7 +329,7 @@ func (r *KustomizationReconciler) reconcile(
 	defer os.RemoveAll(tmpDir)
 
 	// download artifact and extract files
-	err = r.download(source.GetArtifact(), tmpDir)
+	err = r.artifactFetcher.Fetch(source.GetArtifact(), tmpDir)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
 			kustomization,
@@ -350,7 +360,7 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// setup the Kubernetes client for impersonation
-	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts)
+	impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts, r.PollingOpts)
 	kubeClient, statusPoller, err := impersonation.GetClient(ctx)
 	if err != nil {
 		return kustomizev1.KustomizationNotReady(
@@ -525,70 +535,6 @@ func (r *KustomizationReconciler) checkDependencies(source sourcev1.Source, kust
 	return nil
 }
 
-func (r *KustomizationReconciler) download(artifact *sourcev1.Artifact, tmpDir string) error {
-	artifactURL := artifact.URL
-	if hostname := os.Getenv("SOURCE_CONTROLLER_LOCALHOST"); hostname != "" {
-		u, err := url.Parse(artifactURL)
-		if err != nil {
-			return err
-		}
-		u.Host = hostname
-		artifactURL = u.String()
-	}
-
-	req, err := retryablehttp.NewRequest(http.MethodGet, artifactURL, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create a new request: %w", err)
-	}
-
-	resp, err := r.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to download artifact, error: %w", err)
-	}
-	defer resp.Body.Close()
-
-	// check response
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download artifact from %s, status: %s", artifactURL, resp.Status)
-	}
-
-	var buf bytes.Buffer
-
-	// verify checksum matches origin
-	if err := r.verifyArtifact(artifact, &buf, resp.Body); err != nil {
-		return err
-	}
-
-	// extract
-	if _, err = untar.Untar(&buf, tmpDir); err != nil {
-		return fmt.Errorf("failed to untar artifact, error: %w", err)
-	}
-
-	return nil
-}
-
-func (r *KustomizationReconciler) verifyArtifact(artifact *sourcev1.Artifact, buf *bytes.Buffer, reader io.Reader) error {
-	hasher := sha256.New()
-
-	// for backwards compatibility with source-controller v0.17.2 and older
-	if len(artifact.Checksum) == 40 {
-		hasher = sha1.New()
-	}
-
-	// compute checksum
-	mw := io.MultiWriter(hasher, buf)
-	if _, err := io.Copy(mw, reader); err != nil {
-		return err
-	}
-
-	if checksum := fmt.Sprintf("%x", hasher.Sum(nil)); checksum != artifact.Checksum {
-		return fmt.Errorf("failed to verify artifact: computed checksum '%s' doesn't match advertised '%s'",
-			checksum, artifact.Checksum)
-	}
-
-	return nil
-}
-
 func (r *KustomizationReconciler) getSource(ctx context.Context, kustomization kustomizev1.Kustomization) (sourcev1.Source, error) {
 	var source sourcev1.Source
 	sourceNamespace := kustomization.GetNamespace()
@@ -607,6 +553,16 @@ func (r *KustomizationReconciler) getSource(ctx context.Context, kustomization k
 	}
 
 	switch kustomization.Spec.SourceRef.Kind {
+	case sourcev1.OCIRepositoryKind:
+		var repository sourcev1.OCIRepository
+		err := r.Client.Get(ctx, namespacedName, &repository)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return source, err
+			}
+			return source, fmt.Errorf("unable to get source '%s': %w", namespacedName, err)
+		}
+		source = &repository
 	case sourcev1.GitRepositoryKind:
 		var repository sourcev1.GitRepository
 		err := r.Client.Get(ctx, namespacedName, &repository)
@@ -931,7 +887,7 @@ func (r *KustomizationReconciler) finalize(ctx context.Context, kustomization ku
 		kustomization.Status.Inventory.Entries != nil {
 		objects, _ := ListObjectsInInventory(kustomization.Status.Inventory)
 
-		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts)
+		impersonation := NewKustomizeImpersonation(kustomization, r.Client, r.StatusPoller, r.DefaultServiceAccount, r.KubeConfigOpts, r.PollingOpts)
 		if impersonation.CanFinalize(ctx) {
 			kubeClient, _, err := impersonation.GetClient(ctx)
 			if err != nil {

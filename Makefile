@@ -64,6 +64,7 @@ run: generate fmt vet manifests
 download-crd-deps:
 	curl -s https://raw.githubusercontent.com/fluxcd/source-controller/${SOURCE_VER}/config/crd/bases/source.toolkit.fluxcd.io_gitrepositories.yaml > config/crd/bases/gitrepositories.yaml
 	curl -s https://raw.githubusercontent.com/fluxcd/source-controller/${SOURCE_VER}/config/crd/bases/source.toolkit.fluxcd.io_buckets.yaml > config/crd/bases/buckets.yaml
+	curl -s https://raw.githubusercontent.com/fluxcd/source-controller/${SOURCE_VER}/config/crd/bases/source.toolkit.fluxcd.io_ocirepositories.yaml > config/crd/bases/ocirepositories.yaml
 
 # Install CRDs into a cluster
 install: manifests
@@ -103,8 +104,8 @@ api-docs: gen-crd-api-reference-docs
 
 # Run go mod tidy
 tidy:
-	cd api; rm -f go.sum; go mod tidy -compat=1.17
-	rm -f go.sum; go mod tidy -compat=1.17
+	cd api; rm -f go.sum; go mod tidy -compat=1.18
+	rm -f go.sum; go mod tidy -compat=1.18
 
 # Run go fmt against code
 fmt:

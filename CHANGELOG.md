@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.27.0
+
+**Release date:** 2022-08-08
+
+This prerelease comes with support for the `OCIRepository` source type.
+
+In addition, the controller has been updated to Kubernetes v1.24.3
+and Kustomize v4.5.7.
+
+Features:
+- Add support for OCIRepository sources
+  [#684](https://github.com/fluxcd/kustomize-controller/pull/684)
+
+Improvements:
+- Update dependencies
+  [#704](https://github.com/fluxcd/kustomize-controller/pull/704)
+
+## 0.26.3
+
+**Release date:** 2022-07-13
+
+This prerelease adds a retry mechanism for "not found" errors when
+downloading artifacts and recovers from SOPS store panics.
+Some dependencies have also been updated to patch upstream CVEs.
+
+Fixes:
+- decryptor: recover from SOPS store panic
+  [#691](https://github.com/fluxcd/kustomize-controller/pull/691)
+
+Improvements:
+- Retry downloading artifacts on not found errors
+  [#689](https://github.com/fluxcd/kustomize-controller/pull/689)
+- Update dependencies
+  [#692](https://github.com/fluxcd/kustomize-controller/pull/692)
+  [#696](https://github.com/fluxcd/kustomize-controller/pull/696)
+- build: Upgrade to Go 1.18
+  [#694](https://github.com/fluxcd/kustomize-controller/pull/694)
+
+## 0.26.2
+
+**Release date:** 2022-06-29
+
+This prerelease adds support for health checking Kubernetes Jobs 
+when impersonating a service account.
+
+Fixes:
+- Fix job wait by adding polling options to impersonation client
+  [#687](https://github.com/fluxcd/kustomize-controller/pull/687)
+
 ## 0.26.1
 
 **Release date:** 2022-06-08
