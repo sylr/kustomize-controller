@@ -57,29 +57,6 @@ metadata:
 data:
   key: "%[2]s"
 ---
-apiVersion: autoscaling/v2beta1
-kind: HorizontalPodAutoscaler
-metadata:
-  labels:
-  name: "v2beta1-%[1]s"
-  namespace: "%[2]s"
-spec:
-  maxReplicas: 6
-  metrics:
-  - resource:
-      name: cpu
-      targetAverageUtilization: 80
-    type: Resource
-  - resource:
-      name: memory
-      targetAverageUtilization: 80
-    type: Resource
-  minReplicas: 2
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: test
----
 apiVersion: autoscaling/v2beta2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -167,6 +144,7 @@ spec:
 	}, timeout, time.Second).Should(BeTrue())
 
 	t.Run("fails due to source not found", func(t *testing.T) {
+		g := NewWithT(t)
 		g.Eventually(func() bool {
 			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
 			ready := apimeta.FindStatusCondition(resultK.Status.Conditions, meta.ReadyCondition)
@@ -175,6 +153,7 @@ spec:
 	})
 
 	t.Run("reconciles when source is found", func(t *testing.T) {
+		g := NewWithT(t)
 		err = applyGitRepository(repositoryName, artifact, revision)
 		g.Expect(err).NotTo(HaveOccurred())
 
@@ -186,6 +165,7 @@ spec:
 	})
 
 	t.Run("fails due to dependency not found", func(t *testing.T) {
+		g := NewWithT(t)
 		g.Eventually(func() error {
 			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
 			resultK.Spec.DependsOn = []meta.NamespacedObjectReference{

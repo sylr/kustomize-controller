@@ -569,7 +569,7 @@ spec:
   targetNamespace: test
 ```
 
-The `targetNamespace` is expected to exist.
+While the field `targetNamespace` in a Kustomization is optional, if this field is non-empty then the Kubernetes namespace pointed to by `targetNamespace` must exist prior to the Kustomization being applied, kustomize-controller will not create the namespace.
 
 ### Patches
 
@@ -1125,7 +1125,7 @@ on your EKS cluster, you can create an IAM Role and Service Account with access
 to AWS KMS (using at least `kms:Decrypt` and `kms:DescribeKey`). Once these are
 created, you can annotate the kustomize-controller Service Account with the
 Role ARN, granting the controller permissions to decrypt the Secrets. Please refer
-to the [SOPS guide](https://fluxcd.io/docs/guides/mozilla-sops/#aws) for detailed steps.
+to the [SOPS guide](https://fluxcd.io/flux/guides/mozilla-sops/#aws) for detailed steps.
 
 ```sh
 kubectl -n flux-system annotate serviceaccount kustomize-controller \

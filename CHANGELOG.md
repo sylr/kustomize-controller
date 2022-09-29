@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.28.0
+
+**Release date:** 2022-09-12
+
+This prerelease comes with improvements to reconciling Kubernetes class type objects,
+SOPS decryption and fuzzing. In addition, the controller dependencies have been updated
+to Kubernetes controller-runtime v0.12.
+
+:warning: **Breaking change:** The controller logs have been aligned
+with the Kubernetes structured logging. For more details on the new logging
+structure please see: [fluxcd/flux2#3051](https://github.com/fluxcd/flux2/issues/3051).
+
+Improvements:
+- Align controller logs to Kubernetes structured logging
+  [#718](https://github.com/fluxcd/kustomize-controller/pull/718)
+- Reconcile Kubernetes class type objects in a dedicated stage
+  [#720](https://github.com/fluxcd/kustomize-controller/pull/720)
+- Sort SOPS masterkeys so offline decrypt methods are tried first
+  [#726](https://github.com/fluxcd/kustomize-controller/pull/726)
+- SOPS: Update the AWS SDK for KMS
+  [#721](https://github.com/fluxcd/kustomize-controller/pull/721)
+- Refactor Fuzzers based on Go native fuzzing
+  [#723](https://github.com/fluxcd/kustomize-controller/pull/723)
+- Fuzz optimisations
+  [#722](https://github.com/fluxcd/kustomize-controller/pull/722)
+- Update dependencies
+  [#724](https://github.com/fluxcd/kustomize-controller/pull/724)
+
+## 0.27.1
+
+**Release date:** 2022-08-29
+
+This prerelease comes with panic recovery,
+to protect the controller from crashing when reconciliations lead to a crash.
+
+In addition, the controller dependencies have been updated to Kubernetes v1.25.0.
+
+Improvements:
+- Enable RecoverPanic option on reconciler
+  [#708](https://github.com/fluxcd/kustomize-controller/pull/708)
+- Update Kubernetes packages to v1.25.0
+  [#714](https://github.com/fluxcd/kustomize-controller/pull/714)
+- Add file path to sops decryption errors
+  [#706](https://github.com/fluxcd/kustomize-controller/pull/706)
+- Update doc on target namespace
+  [#712](https://github.com/fluxcd/kustomize-controller/pull/712)
+
 ## 0.27.0
 
 **Release date:** 2022-08-08
@@ -1460,7 +1507,7 @@ using the [notification.fluxcd.io API](https://github.com/fluxcd/notification-co
 **Release date:** 2020-06-24
 
 This is the first prerelease ready for public testing. To get started
-testing, see the [GitOps Toolkit guide](https://fluxcd.io/docs/get-started/).
+testing, see the [GitOps Toolkit guide](https://fluxcd.io/flux/get-started/).
 
 ## 0.0.1-beta.2
 
