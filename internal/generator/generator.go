@@ -14,52 +14,47 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package generator
 
 import (
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-	"sync"
 
-	"sigs.k8s.io/kustomize/api/filesys"
+	"strings"
+
+	securefs "github.com/fluxcd/pkg/kustomize/filesys"
 	"sigs.k8s.io/kustomize/api/konfig"
-	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/provider"
-	"sigs.k8s.io/kustomize/api/resmap"
 	kustypes "sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/yaml"
 
-	"github.com/fluxcd/pkg/apis/kustomize"
-	securefs "github.com/fluxcd/pkg/kustomize/filesys"
-
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	"github.com/fluxcd/pkg/apis/kustomize"
 )
 
 type KustomizeGenerator struct {
 	root          string
-	kustomization kustomizev1.Kustomization
+	kustomization *kustomizev1.Kustomization
 }
 
-func NewGenerator(root string, kustomization kustomizev1.Kustomization) *KustomizeGenerator {
+func NewGenerator(root string, kustomization *kustomizev1.Kustomization) *KustomizeGenerator {
 	return &KustomizeGenerator{
 		root:          root,
 		kustomization: kustomization,
 	}
 }
 
-func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
-	if err := kg.generateKustomization(dirPath); err != nil {
-		return err
+func (kg *KustomizeGenerator) WriteFile(dirPath string) (string, error) {
+	kfile, err := kg.generateKustomization(dirPath)
+	if err != nil {
+		return "", err
 	}
-
-	kfile := filepath.Join(dirPath, konfig.DefaultKustomizationFileName())
 
 	data, err := os.ReadFile(kfile)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	kus := kustypes.Kustomization{
@@ -70,7 +65,7 @@ func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
 	}
 
 	if err := yaml.Unmarshal(data, &kus); err != nil {
-		return err
+		return "", err
 	}
 
 	if kg.kustomization.Spec.TargetNamespace != "" {
@@ -91,7 +86,7 @@ func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
 	for _, m := range kg.kustomization.Spec.PatchesJSON6902 {
 		patch, err := json.Marshal(m.Patch)
 		if err != nil {
-			return err
+			return "", err
 		}
 		kus.PatchesJson6902 = append(kus.PatchesJson6902, kustypes.Patch{
 			Patch:  string(patch),
@@ -115,9 +110,9 @@ func (kg *KustomizeGenerator) WriteFile(dirPath string) error {
 
 	kd, err := yaml.Marshal(kus)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.WriteFile(kfile, kd, os.ModePerm)
+	return kfile, os.WriteFile(kfile, kd, os.ModePerm)
 }
 
 func checkKustomizeImageExists(images []kustypes.Image, imageName string) (bool, int) {
@@ -130,17 +125,17 @@ func checkKustomizeImageExists(images []kustypes.Image, imageName string) (bool,
 	return false, -1
 }
 
-func (kg *KustomizeGenerator) generateKustomization(dirPath string) error {
+func (kg *KustomizeGenerator) generateKustomization(dirPath string) (string, error) {
 	fs, err := securefs.MakeFsOnDiskSecure(kg.root)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Determine if there already is a Kustomization file at the root,
 	// as this means we do not have to generate one.
 	for _, kfilename := range konfig.RecognizedKustomizationFileNames() {
 		if kpath := filepath.Join(dirPath, kfilename); fs.Exists(kpath) && !fs.IsDir(kpath) {
-			return nil
+			return kpath, nil
 		}
 	}
 
@@ -188,21 +183,21 @@ func (kg *KustomizeGenerator) generateKustomization(dirPath string) error {
 
 	abs, err := filepath.Abs(dirPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	files, err := scan(abs)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	kfile := filepath.Join(dirPath, konfig.DefaultKustomizationFileName())
 	f, err := fs.Create(kfile)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err = f.Close(); err != nil {
-		return err
+		return "", err
 	}
 
 	kus := kustypes.Kustomization{
@@ -220,10 +215,10 @@ func (kg *KustomizeGenerator) generateKustomization(dirPath string) error {
 	kus.Resources = resources
 	kd, err := yaml.Marshal(kus)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return os.WriteFile(kfile, kd, os.ModePerm)
+	return kfile, os.WriteFile(kfile, kd, os.ModePerm)
 }
 
 func adaptSelector(selector *kustomize.Selector) (output *kustypes.Selector) {
@@ -238,51 +233,4 @@ func adaptSelector(selector *kustomize.Selector) (output *kustypes.Selector) {
 		output.AnnotationSelector = selector.AnnotationSelector
 	}
 	return
-}
-
-// TODO: remove mutex when kustomize fixes the concurrent map read/write panic
-var kustomizeBuildMutex sync.Mutex
-
-// secureBuildKustomization wraps krusty.MakeKustomizer with the following settings:
-//   - secure on-disk FS denying operations outside root
-//   - load files from outside the kustomization dir path
-//     (but not outside root)
-//   - disable plugins except for the builtin ones
-func secureBuildKustomization(root, dirPath string, allowRemoteBases bool) (_ resmap.ResMap, err error) {
-	var fs filesys.FileSystem
-
-	// Create secure FS for root with or without remote base support
-	if allowRemoteBases {
-		fs, err = securefs.MakeFsOnDiskSecureBuild(root)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		fs, err = securefs.MakeFsOnDiskSecure(root)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Temporary workaround for concurrent map read and map write bug
-	// https://github.com/kubernetes-sigs/kustomize/issues/3659
-	kustomizeBuildMutex.Lock()
-	defer kustomizeBuildMutex.Unlock()
-
-	// Kustomize tends to panic in unpredicted ways due to (accidental)
-	// invalid object data; recover when this happens to ensure continuity of
-	// operations
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("recovered from kustomize build panic: %v", r)
-		}
-	}()
-
-	buildOptions := &krusty.Options{
-		LoadRestrictions: kustypes.LoadRestrictionsNone,
-		PluginConfig:     kustypes.DisabledPluginConfig(),
-	}
-
-	k := krusty.MakeKustomizer(buildOptions)
-	return k.Run(fs, dirPath)
 }

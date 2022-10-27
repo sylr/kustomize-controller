@@ -97,7 +97,7 @@ data:
 		Spec: kustomizev1.KustomizationSpec{
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
-			KubeConfig: &kustomizev1.KubeConfig{
+			KubeConfig: &meta.KubeConfigReference{
 				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
@@ -225,7 +225,7 @@ data:
 		Spec: kustomizev1.KustomizationSpec{
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
-			KubeConfig: &kustomizev1.KubeConfig{
+			KubeConfig: &meta.KubeConfigReference{
 				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
@@ -306,6 +306,20 @@ kind: Kustomization
 
 		g.Expect(len(resultK.Status.Inventory.Entries)).Should(BeIdenticalTo(2))
 	})
+
+	t.Run("deletes suspended", func(t *testing.T) {
+		g.Eventually(func() error {
+			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
+			resultK.Spec.Suspend = true
+			return k8sClient.Update(context.Background(), resultK)
+		}, timeout, time.Second).Should(BeNil())
+
+		g.Expect(k8sClient.Delete(context.Background(), kustomization)).To(Succeed())
+		g.Eventually(func() bool {
+			err = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), kustomization)
+			return apierrors.IsNotFound(err)
+		}, timeout, time.Second).Should(BeTrue())
+	})
 }
 
 func TestKustomizationReconciler_PruneSkipNotOwned(t *testing.T) {
@@ -369,7 +383,7 @@ data:
 		Spec: kustomizev1.KustomizationSpec{
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
-			KubeConfig: &kustomizev1.KubeConfig{
+			KubeConfig: &meta.KubeConfigReference{
 				SecretRef: meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},

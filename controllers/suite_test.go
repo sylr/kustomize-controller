@@ -17,26 +17,16 @@ limitations under the License.
 package controllers
 
 import (
-	"archive/tar"
-	"compress/gzip"
 	"context"
-	"crypto/sha1"
 	"crypto/sha256"
 	"fmt"
-	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"strings"
+	"sigs.k8s.io/yaml"
 	"testing"
 	"time"
 
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
-	"github.com/fluxcd/pkg/apis/meta"
-	"github.com/fluxcd/pkg/runtime/controller"
-	"github.com/fluxcd/pkg/runtime/testenv"
-	"github.com/fluxcd/pkg/testserver"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
 	"github.com/hashicorp/vault/api"
 	"github.com/ory/dockertest"
 	corev1 "k8s.io/api/core/v1"
@@ -48,6 +38,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	controllerLog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/fluxcd/pkg/apis/meta"
+	"github.com/fluxcd/pkg/runtime/conditions"
+	kcheck "github.com/fluxcd/pkg/runtime/conditions/check"
+	"github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/testenv"
+	"github.com/fluxcd/pkg/testserver"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 )
 
 func init() {
@@ -70,6 +70,7 @@ var (
 	testMetricsH controller.Metrics
 	ctx          = ctrl.SetupSignalHandler()
 	kubeConfig   []byte
+	kstatusCheck *kcheck.Checker
 	debugMode    = os.Getenv("DEBUG_TEST") != ""
 )
 
@@ -161,11 +162,15 @@ func TestMain(m *testing.M) {
 	runInContext(func(testEnv *testenv.Environment) {
 		controllerName := "kustomize-controller"
 		testMetricsH = controller.MustMakeMetrics(testEnv)
+		kstatusCheck = kcheck.NewChecker(testEnv.Client,
+			&kcheck.Conditions{
+				NegativePolarity: []string{meta.StalledCondition, meta.ReconcilingCondition},
+			})
 		reconciler = &KustomizationReconciler{
-			ControllerName:  controllerName,
-			Client:          testEnv,
-			EventRecorder:   testEnv.GetEventRecorderFor(controllerName),
-			MetricsRecorder: testMetricsH.MetricsRecorder,
+			ControllerName: controllerName,
+			Client:         testEnv,
+			EventRecorder:  testEnv.GetEventRecorderFor(controllerName),
+			Metrics:        testMetricsH,
 		}
 		if err := (reconciler).SetupWithManager(testEnv, KustomizationReconcilerOptions{
 			MaxConcurrentReconciles:   4,
@@ -189,6 +194,39 @@ func randStringRunes(n int) string {
 		b[i] = letterRunes[rand.Intn(len(letterRunes))]
 	}
 	return string(b)
+}
+
+func isReconcileRunning(k *kustomizev1.Kustomization) bool {
+	return conditions.IsReconciling(k) &&
+		conditions.GetReason(k, meta.ReconcilingCondition) != kustomizev1.ProgressingWithRetryReason
+}
+
+func isReconcileSuccess(k *kustomizev1.Kustomization) bool {
+	return conditions.IsReady(k) &&
+		conditions.GetObservedGeneration(k, meta.ReadyCondition) == k.Generation &&
+		k.Status.ObservedGeneration == k.Generation &&
+		k.Status.LastAppliedRevision == k.Status.LastAttemptedRevision
+}
+
+func isReconcileFailure(k *kustomizev1.Kustomization) bool {
+	if conditions.IsStalled(k) {
+		return true
+	}
+
+	isHandled := true
+	if v, ok := meta.ReconcileAnnotationValue(k.GetAnnotations()); ok {
+		isHandled = k.Status.LastHandledReconcileAt == v
+	}
+
+	return isHandled && conditions.IsReconciling(k) &&
+		conditions.IsFalse(k, meta.ReadyCondition) &&
+		conditions.GetObservedGeneration(k, meta.ReadyCondition) == k.Generation &&
+		conditions.GetReason(k, meta.ReconcilingCondition) == kustomizev1.ProgressingWithRetryReason
+}
+
+func logStatus(t *testing.T, k *kustomizev1.Kustomization) {
+	sts, _ := yaml.Marshal(k.Status)
+	t.Log(string(sts))
 }
 
 func getEvents(objName string, annotations map[string]string) []corev1.Event {
@@ -286,95 +324,6 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string, revision s
 		return err
 	}
 	return nil
-}
-
-func createArtifact(artifactServer *testserver.ArtifactServer, fixture, path string) (string, error) {
-	if f, err := os.Stat(fixture); os.IsNotExist(err) || !f.IsDir() {
-		return "", fmt.Errorf("invalid fixture path: %s", fixture)
-	}
-	f, err := os.Create(filepath.Join(artifactServer.Root(), path))
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			os.Remove(f.Name())
-		}
-	}()
-
-	h := sha1.New()
-
-	mw := io.MultiWriter(h, f)
-	gw := gzip.NewWriter(mw)
-	tw := tar.NewWriter(gw)
-
-	if err = filepath.Walk(fixture, func(p string, fi os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Ignore anything that is not a file (directories, symlinks)
-		if !fi.Mode().IsRegular() {
-			return nil
-		}
-
-		// Ignore dotfiles
-		if strings.HasPrefix(fi.Name(), ".") {
-			return nil
-		}
-
-		header, err := tar.FileInfoHeader(fi, p)
-		if err != nil {
-			return err
-		}
-		// The name needs to be modified to maintain directory structure
-		// as tar.FileInfoHeader only has access to the base name of the file.
-		// Ref: https://golang.org/src/archive/tar/common.go?#L626
-		relFilePath := p
-		if filepath.IsAbs(fixture) {
-			relFilePath, err = filepath.Rel(fixture, p)
-			if err != nil {
-				return err
-			}
-		}
-		header.Name = relFilePath
-
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-
-		f, err := os.Open(p)
-		if err != nil {
-			f.Close()
-			return err
-		}
-		if _, err := io.Copy(tw, f); err != nil {
-			f.Close()
-			return err
-		}
-		return f.Close()
-	}); err != nil {
-		return "", err
-	}
-
-	if err := tw.Close(); err != nil {
-		gw.Close()
-		f.Close()
-		return "", err
-	}
-	if err := gw.Close(); err != nil {
-		f.Close()
-		return "", err
-	}
-	if err := f.Close(); err != nil {
-		return "", err
-	}
-
-	if err := os.Chmod(f.Name(), 0644); err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func createVaultTestInstance() (*dockertest.Pool, *dockertest.Resource, error) {
