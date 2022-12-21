@@ -31,6 +31,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kuberecorder "k8s.io/client-go/tools/record"
@@ -47,13 +48,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	apiacl "github.com/fluxcd/pkg/apis/acl"
+	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/http/fetch"
 	"github.com/fluxcd/pkg/runtime/acl"
 	runtimeClient "github.com/fluxcd/pkg/runtime/client"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	runtimeCtrl "github.com/fluxcd/pkg/runtime/controller"
-	"github.com/fluxcd/pkg/runtime/events"
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/predicates"
 	"github.com/fluxcd/pkg/ssa"
@@ -62,8 +63,8 @@ import (
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	"github.com/fluxcd/kustomize-controller/internal/decryptor"
-	"github.com/fluxcd/kustomize-controller/internal/generator"
 	"github.com/fluxcd/kustomize-controller/internal/inventory"
+	generator "github.com/fluxcd/pkg/kustomize"
 )
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;create;update;patch;delete
@@ -175,7 +176,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Finalise the reconciliation and report the results.
 	defer func() {
-		retErr = r.finalizeStatus(ctx, obj, patcher)
+		// Patch finalizers, status and conditions.
+		if err := r.finalizeStatus(ctx, obj, patcher); err != nil {
+			retErr = kerrors.NewAggregate([]error{retErr, err})
+		}
 
 		// Record Prometheus metrics.
 		r.Metrics.RecordReadiness(ctx, obj)
@@ -188,8 +192,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 				time.Since(reconcileStart).String(),
 				obj.Spec.Interval.Duration.String())
 			log.Info(msg, "revision", obj.Status.LastAttemptedRevision)
-			r.event(obj, obj.Status.LastAppliedRevision, events.EventSeverityInfo,
-				msg, map[string]string{kustomizev1.GroupVersion.Group + "/commit_status": "update"})
+			r.event(obj, obj.Status.LastAppliedRevision, eventv1.EventSeverityInfo, msg,
+				map[string]string{
+					kustomizev1.GroupVersion.Group + "/" + eventv1.MetaCommitStatusKey: eventv1.MetaCommitStatusUpdateValue,
+				})
 		}
 	}()
 
@@ -225,7 +231,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		if acl.IsAccessDenied(err) {
 			conditions.MarkFalse(obj, meta.ReadyCondition, apiacl.AccessDeniedReason, err.Error())
 			log.Error(err, "Access denied to cross-namespace source")
-			r.event(obj, "unknown", events.EventSeverityError, err.Error(), nil)
+			r.event(obj, "unknown", eventv1.EventSeverityError, err.Error(), nil)
 			return ctrl.Result{RequeueAfter: obj.GetRetryInterval()}, nil
 		}
 
@@ -247,7 +253,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.DependencyNotReadyReason, err.Error())
 			msg := fmt.Sprintf("Dependencies do not meet ready condition, retrying in %s", r.requeueDependency.String())
 			log.Info(msg)
-			r.event(obj, artifactSource.GetArtifact().Revision, events.EventSeverityInfo, msg, nil)
+			r.event(obj, artifactSource.GetArtifact().Revision, eventv1.EventSeverityInfo, msg, nil)
 			return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
 		}
 		log.Info("All dependencies are ready, proceeding with reconciliation")
@@ -271,7 +277,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			obj.GetRetryInterval().String()),
 			"revision",
 			artifactSource.GetArtifact().Revision)
-		r.event(obj, artifactSource.GetArtifact().Revision, events.EventSeverityError,
+		r.event(obj, artifactSource.GetArtifact().Revision, eventv1.EventSeverityError,
 			reconcileErr.Error(), nil)
 		return ctrl.Result{RequeueAfter: obj.GetRetryInterval()}, nil
 	}
@@ -361,14 +367,19 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// Generate kustomization.yaml if needed.
-	err = r.generate(obj, tmpDir, dirPath)
+	k, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.BuildFailedReason, err.Error())
+		return err
+	}
+	err = r.generate(unstructured.Unstructured{Object: k}, tmpDir, dirPath)
 	if err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.BuildFailedReason, err.Error())
 		return err
 	}
 
 	// Build the Kustomize overlay and decrypt secrets if needed.
-	resources, err := r.build(ctx, obj, tmpDir, dirPath)
+	resources, err := r.build(ctx, obj, unstructured.Unstructured{Object: k}, tmpDir, dirPath)
 	if err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.BuildFailedReason, err.Error())
 		return err
@@ -543,14 +554,14 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 	return src, nil
 }
 
-func (r *KustomizationReconciler) generate(obj *kustomizev1.Kustomization,
+func (r *KustomizationReconciler) generate(obj unstructured.Unstructured,
 	workDir string, dirPath string) error {
 	_, err := generator.NewGenerator(workDir, obj).WriteFile(dirPath)
 	return err
 }
 
 func (r *KustomizationReconciler) build(ctx context.Context,
-	obj *kustomizev1.Kustomization,
+	obj *kustomizev1.Kustomization, u unstructured.Unstructured,
 	workDir, dirPath string) ([]byte, error) {
 	dec, cleanup, err := decryptor.NewTempDecryptor(workDir, r.Client, obj)
 	if err != nil {
@@ -568,7 +579,7 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 		return nil, fmt.Errorf("error decrypting env sources: %w", err)
 	}
 
-	m, err := generator.Build(workDir, dirPath, !r.NoRemoteBases)
+	m, err := generator.SecureBuild(workDir, dirPath, !r.NoRemoteBases)
 	if err != nil {
 		return nil, fmt.Errorf("kustomize build failed: %w", err)
 	}
@@ -596,7 +607,7 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 
 		// run variable substitutions
 		if obj.Spec.PostBuild != nil {
-			outRes, err := generator.SubstituteVariables(ctx, r.Client, obj, res)
+			outRes, err := generator.SubstituteVariables(ctx, r.Client, u, res, false)
 			if err != nil {
 				return nil, fmt.Errorf("var substitution failed for '%s': %w", res.GetName(), err)
 			}
@@ -778,7 +789,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 	// emit event only if the server-side apply resulted in changes
 	applyLog := strings.TrimSuffix(changeSetLog.String(), "\n")
 	if applyLog != "" {
-		r.event(obj, revision, events.EventSeverityInfo, applyLog, nil)
+		r.event(obj, revision, eventv1.EventSeverityInfo, applyLog, nil)
 	}
 
 	return applyLog != "", resultSet, nil
@@ -846,7 +857,7 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	// Emit recovery event if the previous health check failed.
 	msg := fmt.Sprintf("Health check passed in %s", time.Since(checkStart).String())
 	if !wasHealthy || (isNewRevision && drifted) {
-		r.event(obj, revision, events.EventSeverityInfo, msg, nil)
+		r.event(obj, revision, eventv1.EventSeverityInfo, msg, nil)
 	}
 
 	conditions.MarkTrue(obj, kustomizev1.HealthyCondition, meta.SucceededReason, msg)
@@ -885,7 +896,7 @@ func (r *KustomizationReconciler) prune(ctx context.Context,
 	// emit event only if the prune operation resulted in changes
 	if changeSet != nil && len(changeSet.Entries) > 0 {
 		log.Info(fmt.Sprintf("garbage collection completed: %s", changeSet.String()))
-		r.event(obj, revision, events.EventSeverityInfo, changeSet.String(), nil)
+		r.event(obj, revision, eventv1.EventSeverityInfo, changeSet.String(), nil)
 		return true, nil
 	}
 
@@ -933,19 +944,19 @@ func (r *KustomizationReconciler) finalize(ctx context.Context,
 
 			changeSet, err := resourceManager.DeleteAll(ctx, objects, opts)
 			if err != nil {
-				r.event(obj, obj.Status.LastAppliedRevision, events.EventSeverityError, "pruning for deleted resource failed", nil)
+				r.event(obj, obj.Status.LastAppliedRevision, eventv1.EventSeverityError, "pruning for deleted resource failed", nil)
 				// Return the error so we retry the failed garbage collection
 				return ctrl.Result{}, err
 			}
 
 			if changeSet != nil && len(changeSet.Entries) > 0 {
-				r.event(obj, obj.Status.LastAppliedRevision, events.EventSeverityInfo, changeSet.String(), nil)
+				r.event(obj, obj.Status.LastAppliedRevision, eventv1.EventSeverityInfo, changeSet.String(), nil)
 			}
 		} else {
 			// when the account to impersonate is gone, log the stale objects and continue with the finalization
 			msg := fmt.Sprintf("unable to prune objects: \n%s", ssa.FmtUnstructuredList(objects))
 			log.Error(fmt.Errorf("skiping pruning, failed to find account to impersonate"), msg)
-			r.event(obj, obj.Status.LastAppliedRevision, events.EventSeverityError, msg, nil)
+			r.event(obj, obj.Status.LastAppliedRevision, eventv1.EventSeverityError, msg, nil)
 		}
 	}
 
@@ -972,7 +983,7 @@ func (r *KustomizationReconciler) event(obj *kustomizev1.Kustomization,
 	}
 
 	eventtype := "Normal"
-	if severity == events.EventSeverityError {
+	if severity == eventv1.EventSeverityError {
 		eventtype = "Warning"
 	}
 

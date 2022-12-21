@@ -16,5 +16,10 @@
 
 set -euxo pipefail
 
-# run each fuzzer once to ensure they are working properly
-find /out -type f -iname "fuzz*" -exec echo {} -runs=1 \; | bash -e
+# This file is executed by upstream oss-fuzz for any requirements that
+# are specific for building this project.
+
+# Some tests requires embedded resources. Embedding does not allow
+# for traversing into ascending dirs, therefore we copy those contents here:
+mkdir -p controllers/testdata/crd
+cp config/crd/bases/*.yaml controllers/testdata/crd
