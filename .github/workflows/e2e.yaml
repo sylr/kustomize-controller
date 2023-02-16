@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read # for actions/checkout to fetch code
-  
+
 jobs:
   kind:
     runs-on: ubuntu-latest
@@ -16,12 +16,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
       - name: Setup QEMU
-        uses: docker/setup-qemu-action@v1
-        with:
-          platforms: all
+        uses: docker/setup-qemu-action@v2
       - name: Setup Docker Buildx
         id: buildx
-        uses: docker/setup-buildx-action@v1
+        uses: docker/setup-buildx-action@v2
       - name: Restore Go cache
         uses: actions/cache@v3
         with:
@@ -42,16 +40,12 @@ jobs:
         with:
           go-version: 1.19.x
       - name: Setup Kubernetes
-        uses: engineerd/setup-kind@v0.5.0
+        uses: helm/kind-action@v1.5.0
         with:
-          version: v0.11.1
-          image: kindest/node:v1.21.1@sha256:69860bda5563ac81e3c0057d654b5253219618a22ec3a346306239bba8cfa1a6
+          version: v0.17.0
+          cluster_name: kind
       - name: Setup Kustomize
         uses: fluxcd/pkg//actions/kustomize@main
-      - name: Setup Kubectl
-        uses: fluxcd/pkg/actions/kubectl@main
-        with:
-          version: 1.21.2
       - name: Enable integration tests
         # Only run integration tests for main branch
         if: github.ref == 'refs/heads/main'
@@ -161,9 +155,6 @@ jobs:
       - name: Debug failure
         if: failure()
         run: |
-          which kubectl
-          kubectl version
-          kustomize version
           kubectl -n kustomize-system get gitrepositories -oyaml
           kubectl -n kustomize-system get kustomizations -oyaml
           kubectl -n kustomize-system get all
