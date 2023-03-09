@@ -28,6 +28,7 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/azure"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
+	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/clusterreader"
 	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/engine"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -107,12 +108,12 @@ func main() {
 
 	flag.Parse()
 
+	logger.SetLogger(logger.NewLogger(logOptions))
+
 	if err := featureGates.WithLogger(setupLog).SupportedFeatures(features.FeatureGates()); err != nil {
 		setupLog.Error(err, "unable to load feature gates")
 		os.Exit(1)
 	}
-
-	ctrl.SetLogger(logger.NewLogger(logOptions))
 
 	watchNamespace := ""
 	if !watchAllNamespaces {
@@ -164,6 +165,9 @@ func main() {
 	jobStatusReader := statusreaders.NewCustomJobStatusReader(mgr.GetRESTMapper())
 	pollingOpts := polling.Options{
 		CustomStatusReaders: []engine.StatusReader{jobStatusReader},
+	}
+	if ok, _ := features.Enabled(features.DisableStatusPollerCache); ok {
+		pollingOpts.ClusterReaderFactory = engine.ClusterReaderFactoryFunc(clusterreader.NewDirectClusterReader)
 	}
 	if err = (&controllers.KustomizationReconciler{
 		ControllerName:        controllerName,
