@@ -53,7 +53,7 @@ require (
 
 // Pin kustomize to v4.5.7
 replace (
-	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.12.2-0.20220818082357-d85ba6aa0676
+	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.12.2-0.20230310170126-e8382525c40d
 	sigs.k8s.io/kustomize/kyaml => sigs.k8s.io/kustomize/kyaml v0.13.9
 )
 
@@ -93,6 +93,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.14.4 // indirect
 	github.com/aws/smithy-go v1.13.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/bgentry/go-netrc v0.0.0-20140422174119-9fd32a8b3d3d // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/cenkalti/backoff/v3 v3.2.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.1.3 // indirect
@@ -209,6 +210,6 @@ require (
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/kustomize/kyaml v0.13.9 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.2.3 // indirect
-	sylr.dev/yaml/age/v3 v3.0.0-20220527135827-28ffff5246ba // indirect
+	sylr.dev/yaml/age/v3 v3.0.0-20221203153010-eb6b46db8d90 // indirect
 	sylr.dev/yaml/v3 v3.0.0-20220527135632-500fddf2b049 // indirect
 )
