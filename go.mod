@@ -53,7 +53,7 @@ require (
 
 // Pin kustomize to v4.5.7
 replace (
-	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.12.2-0.20230310170126-e8382525c40d
+	sigs.k8s.io/kustomize/api => github.com/sylr/kustomize/api v0.12.2-0.20230310172724-89deec9aa763
 	sigs.k8s.io/kustomize/kyaml => sigs.k8s.io/kustomize/kyaml v0.13.9
 )
 
