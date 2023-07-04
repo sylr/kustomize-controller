@@ -24,7 +24,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha1"
-	"crypto/sha256"
 	"embed"
 	"errors"
 	"fmt"
@@ -41,6 +40,7 @@ import (
 
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/hashicorp/vault/api"
+	"github.com/opencontainers/go-digest"
 	"github.com/ory/dockertest/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -57,10 +57,11 @@ import (
 	"github.com/fluxcd/pkg/runtime/controller"
 	"github.com/fluxcd/pkg/runtime/testenv"
 	"github.com/fluxcd/pkg/testserver"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 
 	fuzz "github.com/AdaLogics/go-fuzz-headers"
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 )
 
 var (
@@ -75,7 +76,7 @@ var (
 	debugMode    = os.Getenv("DEBUG_TEST") != ""
 )
 
-const vaultVersion = "1.2.2"
+const vaultVersion = "1.13.2"
 const defaultBinVersion = "1.24"
 
 //go:embed testdata/crd/*.yaml
@@ -125,7 +126,7 @@ func Fuzz_Controllers(f *testing.F) {
 				ControllerName: controllerName,
 				Client:         testEnv,
 			}
-			if err := (reconciler).SetupWithManager(testEnv, KustomizationReconcilerOptions{MaxConcurrentReconciles: 1}); err != nil {
+			if err := (reconciler).SetupWithManager(ctx, testEnv, KustomizationReconcilerOptions{}); err != nil {
 				panic(fmt.Sprintf("Failed to start GitRepositoryReconciler: %v", err))
 			}
 		}, func() error {
@@ -598,7 +599,7 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string, revision s
 	}
 
 	b, _ := os.ReadFile(filepath.Join(testServer.Root(), artifactName))
-	checksum := fmt.Sprintf("%x", sha256.Sum256(b))
+	dig := digest.SHA256.FromBytes(b)
 
 	url := fmt.Sprintf("%s/%s", testServer.URL(), artifactName)
 
@@ -615,7 +616,7 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string, revision s
 			Path:           url,
 			URL:            url,
 			Revision:       revision,
-			Checksum:       checksum,
+			Digest:         dig.String(),
 			LastUpdateTime: metav1.Now(),
 		},
 	}

@@ -1,5 +1,5 @@
 /*
-Copyright 2022 The Flux authors
+Copyright 2021 The Flux authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,25 +19,24 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/testserver"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	. "github.com/onsi/gomega"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 )
 
-func TestKustomizationReconciler_ArtifactDownload(t *testing.T) {
+func TestKustomizationReconciler_DependsOn(t *testing.T) {
 	g := NewWithT(t)
-	id := "fetch-" + randStringRunes(5)
+	id := "dep-" + randStringRunes(5)
 	revision := "v1.0.0"
 
 	err := createNamespace(id)
@@ -49,32 +48,67 @@ func TestKustomizationReconciler_ArtifactDownload(t *testing.T) {
 	manifests := func(name string, data string) []testserver.File {
 		return []testserver.File{
 			{
-				Name: "secret.yaml",
+				Name: "config.yaml",
 				Body: fmt.Sprintf(`---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
   name: %[1]s
-stringData:
+data:
   key: "%[2]s"
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: "v2-%[1]s"
+  namespace: "%[2]s"
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: test
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 50
+  - type: Pods
+    pods:
+      metric:
+        name: packets-per-second
+      target:
+        type: AverageValue
+        averageValue: 1k
+  - type: Object
+    object:
+      metric:
+        name: requests-per-second
+      describedObject:
+        apiVersion: networking.k8s.io/v1beta1
+        kind: Ingress
+        name: main-route
+      target:
+        type: Value
+        value: 10k
 `, name, data),
 			},
 		}
 	}
 
-	artifact, err := testServer.ArtifactFromFiles(manifests(id, randStringRunes(5)))
-	g.Expect(err).NotTo(HaveOccurred(), "failed to create artifact from files")
+	artifact, err := testServer.ArtifactFromFiles(manifests(id, id))
+	g.Expect(err).NotTo(HaveOccurred())
 
 	repositoryName := types.NamespacedName{
-		Name:      fmt.Sprintf("fetch-%s", randStringRunes(5)),
+		Name:      fmt.Sprintf("dep-%s", randStringRunes(5)),
 		Namespace: id,
 	}
 
-	err = applyGitRepository(repositoryName, artifact, revision)
-	g.Expect(err).NotTo(HaveOccurred())
-
 	kustomizationKey := types.NamespacedName{
-		Name:      fmt.Sprintf("fetch-%s", randStringRunes(5)),
+		Name:      fmt.Sprintf("dep-%s", randStringRunes(5)),
 		Namespace: id,
 	}
 	kustomization := &kustomizev1.Kustomization{
@@ -95,60 +129,58 @@ stringData:
 				Namespace: repositoryName.Namespace,
 				Kind:      sourcev1.GitRepositoryKind,
 			},
-			HealthChecks: []meta.NamespacedObjectKindReference{
-				{
-					APIVersion: "v1",
-					Kind:       "Secret",
-					Name:       id,
-					Namespace:  id,
-				},
-			},
 			TargetNamespace: id,
-			Force:           false,
+			Prune:           true,
 		},
 	}
 
 	g.Expect(k8sClient.Create(context.Background(), kustomization)).To(Succeed())
 
 	resultK := &kustomizev1.Kustomization{}
-	repo := &sourcev1.GitRepository{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       sourcev1.GitRepositoryKind,
-			APIVersion: sourcev1.GroupVersion.String(),
-		},
-	}
-	g.Expect(k8sClient.Get(context.Background(), repositoryName, repo)).Should(Succeed())
-	repoURL := repo.Status.Artifact.URL
 
-	t.Run("downloads artifact", func(t *testing.T) {
+	g.Eventually(func() bool {
+		_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
+		return apimeta.FindStatusCondition(resultK.Status.Conditions, meta.ReadyCondition) != nil
+	}, timeout, time.Second).Should(BeTrue())
+
+	t.Run("fails due to source not found", func(t *testing.T) {
+		g := NewWithT(t)
 		g.Eventually(func() bool {
 			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
-			return apimeta.IsStatusConditionTrue(resultK.Status.Conditions, meta.ReadyCondition) &&
-				resultK.Status.LastAppliedRevision == revision
+			ready := apimeta.FindStatusCondition(resultK.Status.Conditions, meta.ReadyCondition)
+			return ready.Reason == kustomizev1.ArtifactFailedReason
 		}, timeout, time.Second).Should(BeTrue())
 	})
 
-	t.Run("retries on not found errors", func(t *testing.T) {
-		repo.Status.Artifact.URL = repoURL + "not-found"
-		repo.ManagedFields = nil
-		g.Expect(k8sClient.Status().Update(context.Background(), repo)).To(Succeed())
+	t.Run("reconciles when source is found", func(t *testing.T) {
+		g := NewWithT(t)
+		err = applyGitRepository(repositoryName, artifact, revision)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		g.Eventually(func() bool {
 			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
 			ready := apimeta.FindStatusCondition(resultK.Status.Conditions, meta.ReadyCondition)
-			return strings.Contains(ready.Message, "artifact not found")
+			return ready.Reason == kustomizev1.ReconciliationSucceededReason
 		}, timeout, time.Second).Should(BeTrue())
 	})
 
-	t.Run("recovers after not found errors", func(t *testing.T) {
-		g.Expect(k8sClient.Get(context.Background(), repositoryName, repo)).Should(Succeed())
-		repo.Status.Artifact.URL = repoURL
-		repo.ManagedFields = nil
-		g.Expect(k8sClient.Status().Update(context.Background(), repo)).To(Succeed())
+	t.Run("fails due to dependency not found", func(t *testing.T) {
+		g := NewWithT(t)
+		g.Eventually(func() error {
+			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
+			resultK.Spec.DependsOn = []meta.NamespacedObjectReference{
+				{
+					Namespace: id,
+					Name:      "root",
+				},
+			}
+			return k8sClient.Update(context.Background(), resultK)
+		}, timeout, time.Second).Should(BeNil())
 
 		g.Eventually(func() bool {
 			_ = k8sClient.Get(context.Background(), client.ObjectKeyFromObject(kustomization), resultK)
-			return apimeta.IsStatusConditionTrue(resultK.Status.Conditions, meta.ReadyCondition)
+			ready := apimeta.FindStatusCondition(resultK.Status.Conditions, meta.ReadyCondition)
+			return ready.Reason == kustomizev1.DependencyNotReadyReason
 		}, timeout, time.Second).Should(BeTrue())
 	})
 }

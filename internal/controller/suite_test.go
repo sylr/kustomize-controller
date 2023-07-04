@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"math/rand"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/opencontainers/go-digest"
 	"github.com/ory/dockertest/v3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -45,22 +45,18 @@ import (
 	"github.com/fluxcd/pkg/runtime/controller"
 	"github.com/fluxcd/pkg/runtime/testenv"
 	"github.com/fluxcd/pkg/testserver"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	sourcev1b2 "github.com/fluxcd/source-controller/api/v1beta2"
 
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 )
-
-func init() {
-	rand.Seed(time.Now().UnixNano())
-}
 
 const (
 	timeout                = time.Second * 30
 	interval               = time.Second * 1
 	reconciliationInterval = time.Second * 5
+	vaultVersion           = "1.13.2"
 )
-
-const vaultVersion = "1.2.2"
 
 var (
 	reconciler             *KustomizationReconciler
@@ -75,16 +71,20 @@ var (
 	debugMode              = os.Getenv("DEBUG_TEST") != ""
 )
 
-func runInContext(registerControllers func(*testenv.Environment), run func() error, crdPath string) error {
+func runInContext(registerControllers func(*testenv.Environment), run func() int) (code int) {
 	var err error
-	utilruntime.Must(sourcev1.AddToScheme(scheme.Scheme))
 	utilruntime.Must(kustomizev1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(sourcev1.AddToScheme(scheme.Scheme))
+	utilruntime.Must(sourcev1b2.AddToScheme(scheme.Scheme))
 
 	if debugMode {
 		controllerLog.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(false)))
 	}
 
-	testEnv = testenv.New(testenv.WithCRDPath(crdPath))
+	testEnv = testenv.New(
+		testenv.WithCRDPath(filepath.Join("..", "..", "config", "crd", "bases")),
+		testenv.WithMaxConcurrentReconciles(4),
+	)
 
 	testServer, err = testserver.NewTempArtifactServer()
 	if err != nil {
@@ -131,7 +131,7 @@ func runInContext(registerControllers func(*testenv.Environment), run func() err
 		pool.Purge(resource)
 	}()
 
-	runErr := run()
+	code = run()
 
 	if debugMode {
 		events := &corev1.EventList{}
@@ -154,13 +154,11 @@ func runInContext(registerControllers func(*testenv.Environment), run func() err
 		panic(fmt.Sprintf("Failed to remove storage server dir: %v", err))
 	}
 
-	return runErr
+	return code
 }
 
 func TestMain(m *testing.M) {
-	code := 0
-
-	runInContext(func(testEnv *testenv.Environment) {
+	code := runInContext(func(testEnv *testenv.Environment) {
 		controllerName := "kustomize-controller"
 		testMetricsH = controller.MustMakeMetrics(testEnv)
 		kstatusCheck = kcheck.NewChecker(testEnv.Client,
@@ -179,16 +177,12 @@ func TestMain(m *testing.M) {
 			EventRecorder:  testEnv.GetEventRecorderFor(controllerName),
 			Metrics:        testMetricsH,
 		}
-		if err := (reconciler).SetupWithManager(testEnv, KustomizationReconcilerOptions{
-			MaxConcurrentReconciles:   4,
+		if err := (reconciler).SetupWithManager(ctx, testEnv, KustomizationReconcilerOptions{
 			DependencyRequeueInterval: 2 * time.Second,
 		}); err != nil {
 			panic(fmt.Sprintf("Failed to start KustomizationReconciler: %v", err))
 		}
-	}, func() error {
-		code = m.Run()
-		return nil
-	}, filepath.Join("..", "config", "crd", "bases"))
+	}, m.Run)
 
 	os.Exit(code)
 }
@@ -205,7 +199,7 @@ func randStringRunes(n int) string {
 
 func isReconcileRunning(k *kustomizev1.Kustomization) bool {
 	return conditions.IsReconciling(k) &&
-		conditions.GetReason(k, meta.ReconcilingCondition) != kustomizev1.ProgressingWithRetryReason
+		conditions.GetReason(k, meta.ReconcilingCondition) != meta.ProgressingWithRetryReason
 }
 
 func isReconcileSuccess(k *kustomizev1.Kustomization) bool {
@@ -228,7 +222,7 @@ func isReconcileFailure(k *kustomizev1.Kustomization) bool {
 	return isHandled && conditions.IsReconciling(k) &&
 		conditions.IsFalse(k, meta.ReadyCondition) &&
 		conditions.GetObservedGeneration(k, meta.ReadyCondition) == k.Generation &&
-		conditions.GetReason(k, meta.ReconcilingCondition) == kustomizev1.ProgressingWithRetryReason
+		conditions.GetReason(k, meta.ReconcilingCondition) == meta.ProgressingWithRetryReason
 }
 
 func logStatus(t *testing.T, k *kustomizev1.Kustomization) {
@@ -294,7 +288,7 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string, revision s
 	}
 
 	b, _ := os.ReadFile(filepath.Join(testServer.Root(), artifactName))
-	checksum := fmt.Sprintf("%x", sha256.Sum256(b))
+	dig := digest.SHA256.FromBytes(b)
 
 	url := fmt.Sprintf("%s/%s", testServer.URL(), artifactName)
 
@@ -311,7 +305,7 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string, revision s
 			Path:           url,
 			URL:            url,
 			Revision:       revision,
-			Checksum:       checksum,
+			Digest:         dig.String(),
 			LastUpdateTime: metav1.Now(),
 		},
 	}
@@ -344,13 +338,13 @@ func createVaultTestInstance() (*dockertest.Pool, *dockertest.Resource, error) {
 	// uses a sensible default on windows (tcp/http) and linux/osx (socket)
 	pool, err := dockertest.NewPool("")
 	if err != nil {
-		return nil, nil, fmt.Errorf("Could not connect to docker: %s", err)
+		return nil, nil, fmt.Errorf("could not connect to docker: %s", err)
 	}
 
 	// pulls an image, creates a container based on it and runs it
 	resource, err := pool.Run("vault", vaultVersion, []string{"VAULT_DEV_ROOT_TOKEN_ID=secret"})
 	if err != nil {
-		return nil, nil, fmt.Errorf("Could not start resource: %s", err)
+		return nil, nil, fmt.Errorf("could not start resource: %s", err)
 	}
 
 	os.Setenv("VAULT_ADDR", fmt.Sprintf("http://127.0.0.1:%v", resource.GetPort("8200/tcp")))
@@ -359,24 +353,24 @@ func createVaultTestInstance() (*dockertest.Pool, *dockertest.Resource, error) {
 	if err := pool.Retry(func() error {
 		cli, err := api.NewClient(api.DefaultConfig())
 		if err != nil {
-			return fmt.Errorf("Cannot create Vault Client: %w", err)
+			return fmt.Errorf("cannot create Vault Client: %w", err)
 		}
 		status, err := cli.Sys().InitStatus()
 		if err != nil {
 			return err
 		}
 		if status != true {
-			return fmt.Errorf("Vault not ready yet")
+			return fmt.Errorf("vault not ready yet")
 		}
 		if err := cli.Sys().Mount("sops", &api.MountInput{
 			Type: "transit",
 		}); err != nil {
-			return fmt.Errorf("Cannot create Vault Transit Engine: %w", err)
+			return fmt.Errorf("cannot create Vault Transit Engine: %w", err)
 		}
 
 		return nil
 	}); err != nil {
-		return nil, nil, fmt.Errorf("Could not connect to docker: %w", err)
+		return nil, nil, fmt.Errorf("could not connect to docker: %w", err)
 	}
 
 	return pool, resource, nil

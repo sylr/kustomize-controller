@@ -36,6 +36,11 @@ const (
 
 // KustomizationSpec defines the configuration to calculate the desired state from a Source using Kustomize.
 type KustomizationSpec struct {
+	// CommonMetadata specifies the common labels and annotations that are applied to all resources.
+	// Any existing label or annotation will be overridden if its key matches a common one.
+	// +optional
+	CommonMetadata *CommonMetadata `json:"commonMetadata,omitempty"`
+
 	// DependsOn may contain a meta.NamespacedObjectReference slice
 	// with references to Kustomization resources that must be ready before this
 	// Kustomization can be reconciled.
@@ -150,14 +155,25 @@ type KustomizationSpec struct {
 	// +optional
 	Wait bool `json:"wait,omitempty"`
 
+	// Components specifies relative paths to specifications of other Components.
+	// +optional
+	Components []string `json:"components,omitempty"`
+
 	// Deprecated: Not used in v1beta2.
 	// +kubebuilder:validation:Enum=none;client;server
 	// +optional
 	Validation string `json:"validation,omitempty"`
+}
 
-	// Components specifies relative paths to specifications of other Components
+// CommonMetadata defines the common labels and annotations.
+type CommonMetadata struct {
+	// Annotations to be added to the object's metadata.
 	// +optional
-	Components []string `json:"components,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
+
+	// Labels to be added to the object's metadata.
+	// +optional
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // Decryption defines how decryption is handled for Kubernetes manifests.
@@ -289,13 +305,13 @@ func (in *Kustomization) GetStatusConditions() *[]metav1.Condition {
 
 // +genclient
 // +genclient:Namespaced
-// +kubebuilder:storageversion
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=ks
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp",description=""
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].status",description=""
 // +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.conditions[?(@.type==\"Ready\")].message",description=""
+// +kubebuilder:deprecatedversion:warning="v1beta2 Kustomization is deprecated, upgrade to v1"
 
 // Kustomization is the Schema for the kustomizations API.
 type Kustomization struct {

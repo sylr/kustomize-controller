@@ -45,12 +45,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	apiacl "github.com/fluxcd/pkg/apis/acl"
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/http/fetch"
+	generator "github.com/fluxcd/pkg/kustomize"
 	"github.com/fluxcd/pkg/runtime/acl"
 	runtimeClient "github.com/fluxcd/pkg/runtime/client"
 	"github.com/fluxcd/pkg/runtime/conditions"
@@ -59,12 +59,12 @@ import (
 	"github.com/fluxcd/pkg/runtime/predicates"
 	"github.com/fluxcd/pkg/ssa"
 	"github.com/fluxcd/pkg/tar"
-	sourcev1 "github.com/fluxcd/source-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	sourcev1b2 "github.com/fluxcd/source-controller/api/v1beta2"
 
-	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	"github.com/fluxcd/kustomize-controller/internal/decryptor"
 	"github.com/fluxcd/kustomize-controller/internal/inventory"
-	generator "github.com/fluxcd/pkg/kustomize"
 )
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;create;update;patch;delete
@@ -95,13 +95,12 @@ type KustomizationReconciler struct {
 
 // KustomizationReconcilerOptions contains options for the KustomizationReconciler.
 type KustomizationReconcilerOptions struct {
-	MaxConcurrentReconciles   int
 	HTTPRetry                 int
 	DependencyRequeueInterval time.Duration
 	RateLimiter               ratelimiter.RateLimiter
 }
 
-func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts KustomizationReconcilerOptions) error {
+func (r *KustomizationReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, opts KustomizationReconcilerOptions) error {
 	const (
 		ociRepositoryIndexKey string = ".metadata.ociRepository"
 		gitRepositoryIndexKey string = ".metadata.gitRepository"
@@ -109,20 +108,20 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 	)
 
 	// Index the Kustomizations by the OCIRepository references they (may) point at.
-	if err := mgr.GetCache().IndexField(context.TODO(), &kustomizev1.Kustomization{}, ociRepositoryIndexKey,
-		r.indexBy(sourcev1.OCIRepositoryKind)); err != nil {
+	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, ociRepositoryIndexKey,
+		r.indexBy(sourcev1b2.OCIRepositoryKind)); err != nil {
 		return fmt.Errorf("failed setting index fields: %w", err)
 	}
 
 	// Index the Kustomizations by the GitRepository references they (may) point at.
-	if err := mgr.GetCache().IndexField(context.TODO(), &kustomizev1.Kustomization{}, gitRepositoryIndexKey,
+	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, gitRepositoryIndexKey,
 		r.indexBy(sourcev1.GitRepositoryKind)); err != nil {
 		return fmt.Errorf("failed setting index fields: %w", err)
 	}
 
 	// Index the Kustomizations by the Bucket references they (may) point at.
-	if err := mgr.GetCache().IndexField(context.TODO(), &kustomizev1.Kustomization{}, bucketIndexKey,
-		r.indexBy(sourcev1.BucketKind)); err != nil {
+	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, bucketIndexKey,
+		r.indexBy(sourcev1b2.BucketKind)); err != nil {
 		return fmt.Errorf("failed setting index fields: %w", err)
 	}
 
@@ -135,30 +134,27 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager, opts Kustom
 		os.Getenv("SOURCE_CONTROLLER_LOCALHOST"),
 	)
 
-	recoverPanic := true
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kustomizev1.Kustomization{}, builder.WithPredicates(
 			predicate.Or(predicate.GenerationChangedPredicate{}, predicates.ReconcileRequestedPredicate{}),
 		)).
 		Watches(
-			&source.Kind{Type: &sourcev1.OCIRepository{}},
+			&sourcev1b2.OCIRepository{},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(ociRepositoryIndexKey)),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
 		Watches(
-			&source.Kind{Type: &sourcev1.GitRepository{}},
+			&sourcev1.GitRepository{},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(gitRepositoryIndexKey)),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
 		Watches(
-			&source.Kind{Type: &sourcev1.Bucket{}},
+			&sourcev1b2.Bucket{},
 			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(bucketIndexKey)),
 			builder.WithPredicates(SourceRevisionChangePredicate{}),
 		).
 		WithOptions(controller.Options{
-			MaxConcurrentReconciles: opts.MaxConcurrentReconciles,
-			RateLimiter:             opts.RateLimiter,
-			RecoverPanic:            &recoverPanic,
+			RateLimiter: opts.RateLimiter,
 		}).
 		Complete(r)
 }
@@ -319,7 +315,7 @@ func (r *KustomizationReconciler) reconcile(
 	defer os.RemoveAll(tmpDir)
 
 	// Download artifact and extract files to the tmp dir.
-	err = r.artifactFetcher.Fetch(src.GetArtifact().URL, src.GetArtifact().Checksum, tmpDir)
+	err = r.artifactFetcher.Fetch(src.GetArtifact().URL, src.GetArtifact().Digest, tmpDir)
 	if err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.ArtifactFailedReason, err.Error())
 		return err
@@ -487,8 +483,17 @@ func (r *KustomizationReconciler) checkDependencies(ctx context.Context,
 			return fmt.Errorf("dependency '%s' is not ready", dName)
 		}
 
+		srcNamespace := k.Spec.SourceRef.Namespace
+		if srcNamespace == "" {
+			srcNamespace = k.GetNamespace()
+		}
+		dSrcNamespace := obj.Spec.SourceRef.Namespace
+		if dSrcNamespace == "" {
+			dSrcNamespace = obj.GetNamespace()
+		}
+
 		if k.Spec.SourceRef.Name == obj.Spec.SourceRef.Name &&
-			k.Spec.SourceRef.Namespace == obj.Spec.SourceRef.Namespace &&
+			srcNamespace == dSrcNamespace &&
 			k.Spec.SourceRef.Kind == obj.Spec.SourceRef.Kind &&
 			!source.GetArtifact().HasRevision(k.Status.LastAppliedRevision) {
 			return fmt.Errorf("dependency '%s' revision is not up to date", dName)
@@ -517,8 +522,8 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 	}
 
 	switch obj.Spec.SourceRef.Kind {
-	case sourcev1.OCIRepositoryKind:
-		var repository sourcev1.OCIRepository
+	case sourcev1b2.OCIRepositoryKind:
+		var repository sourcev1b2.OCIRepository
 		err := r.Client.Get(ctx, namespacedName, &repository)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -537,8 +542,8 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 			return src, fmt.Errorf("unable to get source '%s': %w", namespacedName, err)
 		}
 		src = &repository
-	case sourcev1.BucketKind:
-		var bucket sourcev1.Bucket
+	case sourcev1b2.BucketKind:
+		var bucket sourcev1b2.Bucket
 		err := r.Client.Get(ctx, namespacedName, &bucket)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -640,6 +645,10 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		return false, nil, err
 	}
 
+	if meta := obj.Spec.CommonMetadata; meta != nil {
+		ssa.SetCommonMetadata(objects, meta.Labels, meta.Annotations)
+	}
+
 	applyOpts := ssa.DefaultApplyOptions()
 	applyOpts.Force = obj.Spec.Force
 	applyOpts.ExclusionSelector = map[string]string{
@@ -692,7 +701,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 	var defStage []*unstructured.Unstructured
 
 	// contains only Kubernetes Class types e.g.: RuntimeClass, PriorityClass,
-	// StorageClas, VolumeSnapshotClass, IngressClass, GatewayClass, ClusterClass, etc
+	// StorageClass, VolumeSnapshotClass, IngressClass, GatewayClass, ClusterClass, etc
 	var classStage []*unstructured.Unstructured
 
 	// contains all objects except for CRDs, Namespaces and Class type objects
@@ -1014,7 +1023,7 @@ func (r *KustomizationReconciler) finalizeStatus(ctx context.Context,
 	if conditions.IsFalse(obj, meta.ReadyCondition) &&
 		conditions.Has(obj, meta.ReconcilingCondition) {
 		rc := conditions.Get(obj, meta.ReconcilingCondition)
-		rc.Reason = kustomizev1.ProgressingWithRetryReason
+		rc.Reason = meta.ProgressingWithRetryReason
 		conditions.Set(obj, rc)
 	}
 

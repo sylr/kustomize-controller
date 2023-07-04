@@ -24,18 +24,18 @@ RUN go mod download
 
 # copy source code
 COPY main.go main.go
-COPY controllers/ controllers/
 COPY internal/ internal/
 
 # build
 ENV CGO_ENABLED=0
 RUN xx-go build -trimpath -a -o kustomize-controller main.go
 
-FROM alpine:3.17
+FROM alpine:3.18
 
-# Uses GnuPG from edge to patch CVE-2022-3515.
-RUN apk add --no-cache ca-certificates tini git openssh-client && \
-	apk add --no-cache gnupg --repository=https://dl-cdn.alpinelinux.org/alpine/edge/main
+ARG TARGETPLATFORM
+
+RUN apk --no-cache add ca-certificates tini git openssh-client gnupg \
+  && update-ca-certificates
 
 COPY --from=builder /workspace/kustomize-controller /usr/local/bin/
 

@@ -2,6 +2,168 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.0.0
+
+**Release date:** 2023-07-04
+
+This is the first stable release of the controller. From now on, this controller
+follows the [Flux 2 release cadence and support pledge](https://fluxcd.io/flux/releases/).
+
+Starting with this version, the build, release and provenance portions of the
+Flux project supply chain [provisionally meet SLSA Build Level 3](https://fluxcd.io/flux/security/slsa-assessment/).
+
+This release includes several bug fixes. In addition, dependencies have been updated
+to their latest version, including an update of Kubernetes to v1.27.3.
+
+For a comprehensive list of changes since `v0.35.x`, please refer to the
+changelog for [v1.0.0-rc.1](#100-rc1), [v1.0.0-rc.2](#100-rc2),
+[v1.0.0-rc.3](#100-rc3) and [`v1.0.0-rc.4](#100-rc4).
+
+Improvements:
+- Update dependencies
+  [#908](https://github.com/fluxcd/kustomize-controller/pull/908)
+- Align `go.mod` version with Kubernetes (Go 1.20)
+  [#900](https://github.com/fluxcd/kustomize-controller/pull/900)
+
+Fixes:
+- Use kustomization namespace for empty dependency source namespace
+  [#897](https://github.com/fluxcd/kustomize-controller/pull/897)
+- docs: Clarify that targetNamespace namespace can be part of resources
+  [#896](https://github.com/fluxcd/kustomize-controller/pull/896)
+
+## 1.0.0-rc.4
+
+**Release date:** 2023-05-29
+
+This release candidate comes with support for Kustomize v5.0.3.
+
+⚠️ Note that Kustomize v5 contains breaking changes, please consult their
+[changelog](https://github.com/kubernetes-sigs/kustomize/releases/tag/kustomize%2Fv5.0.0)
+for more details.
+
+In addition, the controller dependencies have been updated to
+Kubernetes v1.27.2 and controller-runtime v0.15.0.
+
+Improvements:
+- Update Kubernetes to v1.27 and Kustomize to v5
+  [#850](https://github.com/fluxcd/kustomize-controller/pull/850)
+- Update controller-runtime to v0.15.0
+  [#869](https://github.com/fluxcd/kustomize-controller/pull/869)
+- Update CA certificates
+  [#872](https://github.com/fluxcd/kustomize-controller/pull/872)
+- Update source-controller to v1.0.0-rc.4
+  [#873](https://github.com/fluxcd/kustomize-controller/pull/873)
+
+## 1.0.0-rc.3
+
+**Release date:** 2023-05-12
+
+This release candidate comes with improved error reporting for when
+the controller fails to fetch an artifact due to a checksum mismatch.
+
+In addition, the controller dependencies have been updated to patch
+CVE-2023-1732 and the base image has been updated to Alpine 3.18.
+
+Improvements:
+- Update Alpine to 3.18
+  [#855](https://github.com/fluxcd/kustomize-controller/pull/855)
+- Update dependencies
+  [#862](https://github.com/fluxcd/kustomize-controller/pull/862)
+- build(deps): bump github.com/cloudflare/circl from 1.1.0 to 1.3.3
+  [#860](https://github.com/fluxcd/kustomize-controller/pull/860)
+- docs: Clarify the Kustomize components relative paths requirement
+  [#861](https://github.com/fluxcd/kustomize-controller/pull/861)
+
+## 1.0.0-rc.2
+
+**Release date:** 2023-05-09
+
+This release candidate fixes secrets decryption when using Azure Key Vault.
+
+In addition, the controller dependencies have been updated to their latest
+versions.
+
+Improvements:
+- Fix SOPS azkv envCred
+  [#838](https://github.com/fluxcd/kustomize-controller/pull/838)
+- Update dependencies
+  [#853](https://github.com/fluxcd/kustomize-controller/pull/853)
+
+## 1.0.0-rc.1
+
+**Release date:** 2023-04-03
+
+This release candidate promotes the `Kustomization` API from `v1beta2` to `v1`.
+The controller now supports horizontal scaling using
+sharding based on a label selector.
+
+In addition, the controller now supports Workload Identity when
+decrypting secrets with SOPS and Azure Vault.
+
+### Highlights
+
+This release candidate requires the `GitRepository` API version `v1`,
+first shipped with [source-controller](https://github.com/fluxcd/source-controller)
+v1.0.0-rc.1.
+
+#### API changes
+
+The `Kustomization` kind was promoted from v1beta2 to v1 (GA) and deprecated fields were removed.
+
+A new optional field called `CommonMetadata` was added to the API
+for setting labels and/or annotations to all resources part of a Kustomization.
+The main difference to the Kustomize
+[commonLabels](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/commonlabels/) and
+[commonAnnotations](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/commonannotations/),
+is that the controller sets the labels and annotations only to the top level `metadata` field,
+without patching the Kubernetes Deployment `spec.template` or the Service `spec.selector`.
+
+The `kustomizations.kustomize.toolkit.fluxcd.io` CRD contains the following versions:
+- v1 (storage version)
+- v1beta2 (deprecated)
+- v1beta1 (deprecated)
+
+#### Upgrade procedure
+
+The `Kustomization` v1 API is backwards compatible with v1beta2, except for the following:
+- the deprecated field `.spec.validation` was removed
+- the deprecated field `.spec.patchesStrategicMerge` was removed (replaced by `.spec.patches`)
+- the deprecated field `.spec.patchesJson6902 ` was removed (replaced by `.spec.patches`)
+
+To upgrade from v1beta2, after deploying the new CRD and controller,
+set  `apiVersion: kustomize.toolkit.fluxcd.io/v1` in the YAML files that contain
+`Kustomization` definitions and remove the deprecated fields if any.
+Bumping the API version in manifests can be done gradually.
+It is advised to not delay this procedure as the beta versions will be removed after 6 months.
+
+#### Sharding
+
+Starting with this release, the controller can be configured with
+`--watch-label-selector`, after which only objects with this label will
+be reconciled by the controller.
+
+This allows for horizontal scaling, where kustomize-controller
+can be deployed multiple times with a unique label selector
+which is used as the sharding key.
+
+### Full changelog
+
+Improvements:
+- GA: Promote Kustomization API to `kustomize.toolkit.fluxcd.io/v1`
+  [#822](https://github.com/fluxcd/kustomize-controller/pull/822)
+- Add common labels and annotations patching capabilities
+  [#817](https://github.com/fluxcd/kustomize-controller/pull/817)
+- Add reconciler sharding capability based on label selector
+  [#821](https://github.com/fluxcd/kustomize-controller/pull/821)
+- Support Workload Identity for Azure Vault
+  [#813](https://github.com/fluxcd/kustomize-controller/pull/813)
+- Verify Digest of Artifact
+  [#818](https://github.com/fluxcd/kustomize-controller/pull/818)
+- Move `controllers` to `internal/controllers`
+  [#820](https://github.com/fluxcd/kustomize-controller/pull/820)
+- build(deps): bump github.com/opencontainers/runc from 1.1.2 to 1.1.5
+  [#824](https://github.com/fluxcd/kustomize-controller/pull/824)
+
 ## 0.35.1
 
 **Release date:** 2023-03-20

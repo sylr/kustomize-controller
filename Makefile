@@ -48,7 +48,7 @@ OCIREPO_CRD ?= config/crd/bases/ocirepositories.yaml
 SOURCE_CRD_VER=$(BUILD_DIR)/.src-crd-$(SOURCE_VER)
 
 # API (doc) generation utilities
-CONTROLLER_GEN_VERSION ?= v0.11.1
+CONTROLLER_GEN_VERSION ?= v0.12.0
 GEN_API_REF_DOCS_VERSION ?= e327d0730470cbd61b06300f81c5fcf91c23c113
 
 all: manager
@@ -134,7 +134,7 @@ manifests: controller-gen
 
 # Generate API reference documentation
 api-docs: gen-crd-api-reference-docs
-	$(GEN_CRD_API_REFERENCE_DOCS) -api-dir=./api/v1beta2 -config=./hack/api-docs/config.json -template-dir=./hack/api-docs/template -out-file=./docs/api/kustomize.md
+	$(GEN_CRD_API_REFERENCE_DOCS) -api-dir=./api/v1 -config=./hack/api-docs/config.json -template-dir=./hack/api-docs/template -out-file=./docs/api/v1/kustomize.md
 
 # Run go mod tidy
 tidy:
