@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package controller
 
 import (
 	"context"
@@ -43,6 +43,7 @@ import (
 	"github.com/fluxcd/pkg/runtime/conditions"
 	kcheck "github.com/fluxcd/pkg/runtime/conditions/check"
 	"github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/testenv"
 	"github.com/fluxcd/pkg/testserver"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -160,7 +161,7 @@ func runInContext(registerControllers func(*testenv.Environment), run func() int
 func TestMain(m *testing.M) {
 	code := runInContext(func(testEnv *testenv.Environment) {
 		controllerName := "kustomize-controller"
-		testMetricsH = controller.MustMakeMetrics(testEnv)
+		testMetricsH = controller.NewMetrics(testEnv, metrics.MustMakeRecorder(), kustomizev1.KustomizationFinalizer)
 		kstatusCheck = kcheck.NewChecker(testEnv.Client,
 			&kcheck.Conditions{
 				NegativePolarity: []string{meta.StalledCondition, meta.ReconcilingCondition},
@@ -176,6 +177,7 @@ func TestMain(m *testing.M) {
 			Client:         testEnv,
 			EventRecorder:  testEnv.GetEventRecorderFor(controllerName),
 			Metrics:        testMetricsH,
+			ConcurrentSSA:  4,
 		}
 		if err := (reconciler).SetupWithManager(ctx, testEnv, KustomizationReconcilerOptions{
 			DependencyRequeueInterval: 2 * time.Second,

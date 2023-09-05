@@ -41,8 +41,10 @@ import (
 	runtimeCtrl "github.com/fluxcd/pkg/runtime/controller"
 	"github.com/fluxcd/pkg/runtime/events"
 	feathelper "github.com/fluxcd/pkg/runtime/features"
+	"github.com/fluxcd/pkg/runtime/jitter"
 	"github.com/fluxcd/pkg/runtime/leaderelection"
 	"github.com/fluxcd/pkg/runtime/logger"
+	"github.com/fluxcd/pkg/runtime/metrics"
 	"github.com/fluxcd/pkg/runtime/pprof"
 	"github.com/fluxcd/pkg/runtime/probes"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
@@ -77,6 +79,7 @@ func main() {
 		eventsAddr            string
 		healthAddr            string
 		concurrent            int
+		concurrentSSA         int
 		requeueDependency     time.Duration
 		clientOptions         runtimeClient.Options
 		kubeConfigOpts        runtimeClient.KubeConfigOptions
@@ -84,6 +87,7 @@ func main() {
 		leaderElectionOptions leaderelection.Options
 		rateLimiterOptions    runtimeCtrl.RateLimiterOptions
 		watchOptions          runtimeCtrl.WatchOptions
+		intervalJitterOptions jitter.IntervalOptions
 		aclOptions            acl.Options
 		noRemoteBases         bool
 		httpRetry             int
@@ -95,6 +99,7 @@ func main() {
 	flag.StringVar(&eventsAddr, "events-addr", "", "The address of the events receiver.")
 	flag.StringVar(&healthAddr, "health-addr", ":9440", "The address the health endpoint binds to.")
 	flag.IntVar(&concurrent, "concurrent", 4, "The number of concurrent kustomize reconciles.")
+	flag.IntVar(&concurrentSSA, "concurrent-ssa", 4, "The number of concurrent server-side apply operations.")
 	flag.DurationVar(&requeueDependency, "requeue-dependency", 30*time.Second, "The interval at which failing dependencies are reevaluated.")
 	flag.BoolVar(&noRemoteBases, "no-remote-bases", false,
 		"Disallow remote bases usage in Kustomize overlays. When this flag is enabled, all resources must refer to local files included in the source artifact.")
@@ -109,6 +114,7 @@ func main() {
 	rateLimiterOptions.BindFlags(flag.CommandLine)
 	featureGates.BindFlags(flag.CommandLine)
 	watchOptions.BindFlags(flag.CommandLine)
+	intervalJitterOptions.BindFlags(flag.CommandLine)
 
 	flag.Parse()
 
@@ -118,6 +124,11 @@ func main() {
 
 	if err := featureGates.WithLogger(setupLog).SupportedFeatures(features.FeatureGates()); err != nil {
 		setupLog.Error(err, "unable to load feature gates")
+		os.Exit(1)
+	}
+
+	if err := intervalJitterOptions.SetGlobalJitter(nil); err != nil {
+		setupLog.Error(err, "unable to set global jitter")
 		os.Exit(1)
 	}
 
@@ -189,7 +200,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	metricsH := runtimeCtrl.MustMakeMetrics(mgr)
+	metricsH := runtimeCtrl.NewMetrics(mgr, metrics.MustMakeRecorder(), kustomizev1.KustomizationFinalizer)
 
 	jobStatusReader := statusreaders.NewCustomJobStatusReader(mgr.GetRESTMapper())
 	pollingOpts := polling.Options{
@@ -200,7 +211,12 @@ func main() {
 		pollingOpts.ClusterReaderFactory = engine.ClusterReaderFactoryFunc(clusterreader.NewDirectClusterReader)
 	}
 
-	if err = (&controllers.KustomizationReconciler{
+	failFast := true
+	if ok, _ := features.Enabled(features.DisableFailFastBehavior); ok {
+		failFast = false
+	}
+
+	if err = (&controller.KustomizationReconciler{
 		ControllerName:        controllerName,
 		DefaultServiceAccount: defaultServiceAccount,
 		Client:                mgr.GetClient(),
@@ -208,10 +224,12 @@ func main() {
 		EventRecorder:         eventRecorder,
 		NoCrossNamespaceRefs:  aclOptions.NoCrossNamespaceRefs,
 		NoRemoteBases:         noRemoteBases,
+		FailFast:              failFast,
+		ConcurrentSSA:         concurrentSSA,
 		KubeConfigOpts:        kubeConfigOpts,
 		PollingOpts:           pollingOpts,
 		StatusPoller:          polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), pollingOpts),
-	}).SetupWithManager(ctx, mgr, controllers.KustomizationReconcilerOptions{
+	}).SetupWithManager(ctx, mgr, controller.KustomizationReconcilerOptions{
 		DependencyRequeueInterval: requeueDependency,
 		HTTPRetry:                 httpRetry,
 		RateLimiter:               runtimeCtrl.GetRateLimiter(rateLimiterOptions),

@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
-	"github.com/Azure/azure-sdk-for-go/sdk/keyvault/azkeys"
+	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
 	. "github.com/onsi/gomega"
 	"go.mozilla.org/sops/v3/azkv"
 )
@@ -58,8 +58,8 @@ func TestMasterKey_Decrypt(t *testing.T) {
 	dataKey := []byte("this is super secret data")
 	c, err := azkeys.NewClient(key.VaultURL, key.token, nil)
 	g.Expect(err).ToNot(HaveOccurred())
-	resp, err := c.Encrypt(context.Background(), key.Name, key.Version, azkeys.KeyOperationsParameters{
-		Algorithm: to.Ptr(azkeys.JSONWebKeyEncryptionAlgorithmRSAOAEP256),
+	resp, err := c.Encrypt(context.Background(), key.Name, key.Version, azkeys.KeyOperationParameters{
+		Algorithm: to.Ptr(azkeys.EncryptionAlgorithmRSAOAEP256),
 		Value:     dataKey,
 	}, nil)
 	g.Expect(err).ToNot(HaveOccurred())

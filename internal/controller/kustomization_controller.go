@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controllers
+package controller
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -55,6 +56,7 @@ import (
 	runtimeClient "github.com/fluxcd/pkg/runtime/client"
 	"github.com/fluxcd/pkg/runtime/conditions"
 	runtimeCtrl "github.com/fluxcd/pkg/runtime/controller"
+	"github.com/fluxcd/pkg/runtime/jitter"
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/predicates"
 	"github.com/fluxcd/pkg/ssa"
@@ -89,8 +91,10 @@ type KustomizationReconciler struct {
 	statusManager         string
 	NoCrossNamespaceRefs  bool
 	NoRemoteBases         bool
+	FailFast              bool
 	DefaultServiceAccount string
 	KubeConfigOpts        runtimeClient.KubeConfigOptions
+	ConcurrentSSA         int
 }
 
 // KustomizationReconcilerOptions contains options for the KustomizationReconciler.
@@ -196,16 +200,18 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 	}()
 
-	// Add finalizer first if it doesn't exist to avoid the race condition
-	// between init and delete.
-	if !controllerutil.ContainsFinalizer(obj, kustomizev1.KustomizationFinalizer) {
-		controllerutil.AddFinalizer(obj, kustomizev1.KustomizationFinalizer)
-		return ctrl.Result{Requeue: true}, nil
-	}
-
 	// Prune managed resources if the object is under deletion.
 	if !obj.ObjectMeta.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, obj)
+	}
+
+	// Add finalizer first if it doesn't exist to avoid the race condition
+	// between init and delete.
+	// Note: Finalizers in general can only be added when the deletionTimestamp
+	// is not set.
+	if !controllerutil.ContainsFinalizer(obj, kustomizev1.KustomizationFinalizer) {
+		controllerutil.AddFinalizer(obj, kustomizev1.KustomizationFinalizer)
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Skip reconciliation if the object is suspended.
@@ -260,7 +266,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	reconcileErr := r.reconcile(ctx, obj, artifactSource, patcher)
 
 	// Requeue at the specified retry interval if the artifact tarball is not found.
-	if reconcileErr == fetch.FileNotFoundError {
+	if errors.Is(reconcileErr, fetch.FileNotFoundError) {
 		msg := fmt.Sprintf("Source is not ready, artifact not found, retrying in %s", r.requeueDependency.String())
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.ArtifactFailedReason, msg)
 		log.Info(msg)
@@ -280,7 +286,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Requeue the reconciliation at the specified interval.
-	return ctrl.Result{RequeueAfter: obj.Spec.Interval.Duration}, nil
+	return ctrl.Result{RequeueAfter: jitter.JitteredIntervalDuration(obj.GetRequeueAfter())}, nil
 }
 
 func (r *KustomizationReconciler) reconcile(
@@ -393,6 +399,7 @@ func (r *KustomizationReconciler) reconcile(
 		Group: kustomizev1.GroupVersion.Group,
 	})
 	resourceManager.SetOwnerLabels(objects, obj.GetName(), obj.GetNamespace())
+	resourceManager.SetConcurrency(r.ConcurrentSSA)
 
 	// Update status with the reconciliation progress.
 	progressingMsg = fmt.Sprintf("Detecting drift for revision %s with a timeout of %s", revision, obj.GetTimeout().String())
@@ -653,6 +660,10 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 	applyOpts.Force = obj.Spec.Force
 	applyOpts.ExclusionSelector = map[string]string{
 		fmt.Sprintf("%s/reconcile", kustomizev1.GroupVersion.Group): kustomizev1.DisabledValue,
+		fmt.Sprintf("%s/ssa", kustomizev1.GroupVersion.Group):       kustomizev1.IgnoreValue,
+	}
+	applyOpts.IfNotPresentSelector = map[string]string{
+		fmt.Sprintf("%s/ssa", kustomizev1.GroupVersion.Group): kustomizev1.IfNotPresentValue,
 	}
 	applyOpts.ForceSelector = map[string]string{
 		fmt.Sprintf("%s/force", kustomizev1.GroupVersion.Group): kustomizev1.EnabledValue,
@@ -741,7 +752,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if changeSet != nil && len(changeSet.Entries) > 0 {
 			log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToMap())
 			for _, change := range changeSet.Entries {
-				if change.Action != ssa.UnchangedAction {
+				if HasChanged(change.Action) {
 					changeSetLog.WriteString(change.String() + "\n")
 				}
 			}
@@ -766,7 +777,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if changeSet != nil && len(changeSet.Entries) > 0 {
 			log.Info("server-side apply for cluster class types completed", "output", changeSet.ToMap())
 			for _, change := range changeSet.Entries {
-				if change.Action != ssa.UnchangedAction {
+				if HasChanged(change.Action) {
 					changeSetLog.WriteString(change.String() + "\n")
 				}
 			}
@@ -792,7 +803,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if changeSet != nil && len(changeSet.Entries) > 0 {
 			log.Info("server-side apply completed", "output", changeSet.ToMap(), "revision", revision)
 			for _, change := range changeSet.Entries {
-				if change.Action != ssa.UnchangedAction {
+				if HasChanged(change.Action) {
 					changeSetLog.WriteString(change.String() + "\n")
 				}
 			}
@@ -861,6 +872,7 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	if err := manager.WaitForSet(toCheck, ssa.WaitOptions{
 		Interval: 5 * time.Second,
 		Timeout:  obj.GetTimeout(),
+		FailFast: r.FailFast,
 	}); err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.HealthCheckFailedReason, err.Error())
 		conditions.MarkFalse(obj, kustomizev1.HealthyCondition, kustomizev1.HealthCheckFailedReason, err.Error())
