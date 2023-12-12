@@ -36,8 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kuberecorder "k8s.io/client-go/tools/record"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
-	"sigs.k8s.io/cli-utils/pkg/object"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -47,6 +45,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/ratelimiter"
 
+	"github.com/fluxcd/cli-utils/pkg/kstatus/polling"
+	"github.com/fluxcd/cli-utils/pkg/object"
 	apiacl "github.com/fluxcd/pkg/apis/acl"
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
@@ -83,18 +83,19 @@ type KustomizationReconciler struct {
 	kuberecorder.EventRecorder
 	runtimeCtrl.Metrics
 
-	artifactFetcher       *fetch.ArchiveFetcher
-	requeueDependency     time.Duration
-	StatusPoller          *polling.StatusPoller
-	PollingOpts           polling.Options
-	ControllerName        string
-	statusManager         string
-	NoCrossNamespaceRefs  bool
-	NoRemoteBases         bool
-	FailFast              bool
-	DefaultServiceAccount string
-	KubeConfigOpts        runtimeClient.KubeConfigOptions
-	ConcurrentSSA         int
+	artifactFetcher         *fetch.ArchiveFetcher
+	requeueDependency       time.Duration
+	StatusPoller            *polling.StatusPoller
+	PollingOpts             polling.Options
+	ControllerName          string
+	statusManager           string
+	NoCrossNamespaceRefs    bool
+	NoRemoteBases           bool
+	FailFast                bool
+	DefaultServiceAccount   string
+	KubeConfigOpts          runtimeClient.KubeConfigOptions
+	ConcurrentSSA           int
+	DisallowedFieldManagers []string
 }
 
 // KustomizationReconcilerOptions contains options for the KustomizationReconciler.
@@ -244,10 +245,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Requeue the reconciliation if the source artifact is not found.
 	if artifactSource.GetArtifact() == nil {
-		msg := "Source is not ready, artifact not found"
+		msg := fmt.Sprintf("Source artifact not found, retrying in %s", r.requeueDependency.String())
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.ArtifactFailedReason, msg)
 		log.Info(msg)
-		return ctrl.Result{RequeueAfter: obj.GetRetryInterval()}, nil
+		return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
 	}
 
 	// Check dependencies and requeue the reconciliation if the check fails.
@@ -266,7 +267,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	reconcileErr := r.reconcile(ctx, obj, artifactSource, patcher)
 
 	// Requeue at the specified retry interval if the artifact tarball is not found.
-	if errors.Is(reconcileErr, fetch.FileNotFoundError) {
+	if errors.Is(reconcileErr, fetch.ErrFileNotFound) {
 		msg := fmt.Sprintf("Source is not ready, artifact not found, retrying in %s", r.requeueDependency.String())
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.ArtifactFailedReason, msg)
 		log.Info(msg)
@@ -301,7 +302,7 @@ func (r *KustomizationReconciler) reconcile(
 	conditions.MarkUnknown(obj, meta.ReadyCondition, meta.ProgressingReason, "Reconciliation in progress")
 	conditions.MarkReconciling(obj, meta.ProgressingReason, progressingMsg)
 	if err := r.patch(ctx, obj, patcher); err != nil {
-		return fmt.Errorf("failed to update status, error: %w", err)
+		return fmt.Errorf("failed to update status: %w", err)
 	}
 
 	// Create a snapshot of the current inventory.
@@ -345,7 +346,7 @@ func (r *KustomizationReconciler) reconcile(
 	progressingMsg = fmt.Sprintf("Building manifests for revision %s with a timeout of %s", revision, obj.GetTimeout().String())
 	conditions.MarkReconciling(obj, meta.ProgressingReason, progressingMsg)
 	if err := r.patch(ctx, obj, patcher); err != nil {
-		return fmt.Errorf("failed to update status, error: %w", err)
+		return fmt.Errorf("failed to update status: %w", err)
 	}
 
 	// Configure the Kubernetes client for impersonation.
@@ -405,7 +406,7 @@ func (r *KustomizationReconciler) reconcile(
 	progressingMsg = fmt.Sprintf("Detecting drift for revision %s with a timeout of %s", revision, obj.GetTimeout().String())
 	conditions.MarkReconciling(obj, meta.ProgressingReason, progressingMsg)
 	if err := r.patch(ctx, obj, patcher); err != nil {
-		return fmt.Errorf("failed to update status, error: %w", err)
+		return fmt.Errorf("failed to update status: %w", err)
 	}
 
 	// Validate and apply resources in stages.
@@ -669,6 +670,41 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		fmt.Sprintf("%s/force", kustomizev1.GroupVersion.Group): kustomizev1.EnabledValue,
 	}
 
+	fieldManagers := []ssa.FieldManager{
+		{
+			// to undo changes made with 'kubectl apply --server-side --force-conflicts'
+			Name:          "kubectl",
+			OperationType: metav1.ManagedFieldsOperationApply,
+		},
+		{
+			// to undo changes made with 'kubectl apply'
+			Name:          "kubectl",
+			OperationType: metav1.ManagedFieldsOperationUpdate,
+		},
+		{
+			// to undo changes made with 'kubectl apply'
+			Name:          "before-first-apply",
+			OperationType: metav1.ManagedFieldsOperationUpdate,
+		},
+		{
+			// to undo changes made by the controller before SSA
+			Name:          r.ControllerName,
+			OperationType: metav1.ManagedFieldsOperationUpdate,
+		},
+	}
+
+	for _, fieldManager := range r.DisallowedFieldManagers {
+		fieldManagers = append(fieldManagers, ssa.FieldManager{
+			Name:          fieldManager,
+			OperationType: metav1.ManagedFieldsOperationApply,
+		})
+		// to undo changes made by the controller before SSA
+		fieldManagers = append(fieldManagers, ssa.FieldManager{
+			Name:          fieldManager,
+			OperationType: metav1.ManagedFieldsOperationUpdate,
+		})
+	}
+
 	applyOpts.Cleanup = ssa.ApplyCleanupOptions{
 		Annotations: []string{
 			// remove the kubectl annotation
@@ -681,28 +717,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 			// remove deprecated fluxcd.io labels
 			"fluxcd.io/sync-gc-mark",
 		},
-		FieldManagers: []ssa.FieldManager{
-			{
-				// to undo changes made with 'kubectl apply --server-side --force-conflicts'
-				Name:          "kubectl",
-				OperationType: metav1.ManagedFieldsOperationApply,
-			},
-			{
-				// to undo changes made with 'kubectl apply'
-				Name:          "kubectl",
-				OperationType: metav1.ManagedFieldsOperationUpdate,
-			},
-			{
-				// to undo changes made with 'kubectl apply'
-				Name:          "before-first-apply",
-				OperationType: metav1.ManagedFieldsOperationUpdate,
-			},
-			{
-				// to undo changes made by the controller before SSA
-				Name:          r.ControllerName,
-				OperationType: metav1.ManagedFieldsOperationUpdate,
-			},
-		},
+		FieldManagers: fieldManagers,
 		Exclusions: map[string]string{
 			fmt.Sprintf("%s/ssa", kustomizev1.GroupVersion.Group): kustomizev1.MergeValue,
 		},
@@ -747,9 +762,10 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if err != nil {
 			return false, nil, err
 		}
-		resultSet.Append(changeSet.Entries)
 
 		if changeSet != nil && len(changeSet.Entries) > 0 {
+			resultSet.Append(changeSet.Entries)
+
 			log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToMap())
 			for _, change := range changeSet.Entries {
 				if HasChanged(change.Action) {
@@ -772,9 +788,10 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if err != nil {
 			return false, nil, err
 		}
-		resultSet.Append(changeSet.Entries)
 
 		if changeSet != nil && len(changeSet.Entries) > 0 {
+			resultSet.Append(changeSet.Entries)
+
 			log.Info("server-side apply for cluster class types completed", "output", changeSet.ToMap())
 			for _, change := range changeSet.Entries {
 				if HasChanged(change.Action) {
@@ -798,9 +815,10 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		if err != nil {
 			return false, nil, fmt.Errorf("%w\n%s", err, changeSetLog.String())
 		}
-		resultSet.Append(changeSet.Entries)
 
 		if changeSet != nil && len(changeSet.Entries) > 0 {
+			resultSet.Append(changeSet.Entries)
+
 			log.Info("server-side apply completed", "output", changeSet.ToMap(), "revision", revision)
 			for _, change := range changeSet.Entries {
 				if HasChanged(change.Action) {
@@ -865,7 +883,7 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	conditions.MarkReconciling(obj, meta.ProgressingReason, message)
 	conditions.MarkUnknown(obj, kustomizev1.HealthyCondition, meta.ProgressingReason, message)
 	if err := r.patch(ctx, obj, patcher); err != nil {
-		return fmt.Errorf("unable to update the healthy status to progressing, error: %w", err)
+		return fmt.Errorf("unable to update the healthy status to progressing: %w", err)
 	}
 
 	// Check the health with a default timeout of 30sec shorter than the reconciliation interval.
@@ -876,7 +894,7 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	}); err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, kustomizev1.HealthCheckFailedReason, err.Error())
 		conditions.MarkFalse(obj, kustomizev1.HealthyCondition, kustomizev1.HealthCheckFailedReason, err.Error())
-		return fmt.Errorf("Health check failed after %s: %w", time.Since(checkStart).String(), err)
+		return fmt.Errorf("health check failed after %s: %w", time.Since(checkStart).String(), err)
 	}
 
 	// Emit recovery event if the previous health check failed.
@@ -887,7 +905,7 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 
 	conditions.MarkTrue(obj, kustomizev1.HealthyCondition, meta.SucceededReason, msg)
 	if err := r.patch(ctx, obj, patcher); err != nil {
-		return fmt.Errorf("unable to update the healthy status to progressing, error: %w", err)
+		return fmt.Errorf("unable to update the healthy status to progressing: %w", err)
 	}
 
 	return nil

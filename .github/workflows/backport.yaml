@@ -16,11 +16,11 @@ jobs:
     if: github.event.pull_request.state == 'closed' && github.event.pull_request.merged && (github.event_name != 'labeled' || startsWith('backport:', github.event.label.name))
     steps:
       - name: Checkout
-        uses: actions/checkout@c85c95e3d7251135ab7dc9ce3241c5835cc595a9 # v3.5.3
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Create backport PRs
-        uses: korthout/backport-action@bd68141f079bd036e45ea8149bc9d174d5a04703 # v1.4.0
+        uses: korthout/backport-action@b982d297e31f500652b2246cf26714796312bd23 # v2.2.0
         # xref: https://github.com/korthout/backport-action#inputs
         with:
           # Use token to allow workflows to be triggered for the created PR

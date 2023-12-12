@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/fluxcd/pkg/runtime/conditions"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -55,10 +56,10 @@ func (r *KustomizationReconciler) requestsForRevisionChangeOf(indexKey string) h
 			return nil
 		}
 		var dd []dependency.Dependent
-		for _, d := range list.Items {
-			// If the revision of the artifact equals to the last attempted revision,
-			// we should not make a request for this Kustomization
-			if repo.GetArtifact().HasRevision(d.Status.LastAttemptedRevision) {
+		for i, d := range list.Items {
+			// If the Kustomization is ready and the revision of the artifact equals
+			// to the last attempted revision, we should not make a request for this Kustomization
+			if conditions.IsReady(&list.Items[i]) && repo.GetArtifact().HasRevision(d.Status.LastAttemptedRevision) {
 				continue
 			}
 			dd = append(dd, d.DeepCopy())

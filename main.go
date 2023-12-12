@@ -27,15 +27,16 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/azure"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
-	"k8s.io/utils/pointer"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/clusterreader"
-	"sigs.k8s.io/cli-utils/pkg/kstatus/polling/engine"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/config"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/fluxcd/cli-utils/pkg/kstatus/polling"
+	"github.com/fluxcd/cli-utils/pkg/kstatus/polling/clusterreader"
+	"github.com/fluxcd/cli-utils/pkg/kstatus/polling/engine"
 	"github.com/fluxcd/pkg/runtime/acl"
 	runtimeClient "github.com/fluxcd/pkg/runtime/client"
 	runtimeCtrl "github.com/fluxcd/pkg/runtime/controller"
@@ -75,24 +76,25 @@ func init() {
 
 func main() {
 	var (
-		metricsAddr           string
-		eventsAddr            string
-		healthAddr            string
-		concurrent            int
-		concurrentSSA         int
-		requeueDependency     time.Duration
-		clientOptions         runtimeClient.Options
-		kubeConfigOpts        runtimeClient.KubeConfigOptions
-		logOptions            logger.Options
-		leaderElectionOptions leaderelection.Options
-		rateLimiterOptions    runtimeCtrl.RateLimiterOptions
-		watchOptions          runtimeCtrl.WatchOptions
-		intervalJitterOptions jitter.IntervalOptions
-		aclOptions            acl.Options
-		noRemoteBases         bool
-		httpRetry             int
-		defaultServiceAccount string
-		featureGates          feathelper.FeatureGates
+		metricsAddr             string
+		eventsAddr              string
+		healthAddr              string
+		concurrent              int
+		concurrentSSA           int
+		requeueDependency       time.Duration
+		clientOptions           runtimeClient.Options
+		kubeConfigOpts          runtimeClient.KubeConfigOptions
+		logOptions              logger.Options
+		leaderElectionOptions   leaderelection.Options
+		rateLimiterOptions      runtimeCtrl.RateLimiterOptions
+		watchOptions            runtimeCtrl.WatchOptions
+		intervalJitterOptions   jitter.IntervalOptions
+		aclOptions              acl.Options
+		noRemoteBases           bool
+		httpRetry               int
+		defaultServiceAccount   string
+		featureGates            feathelper.FeatureGates
+		disallowedFieldManagers []string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
@@ -105,6 +107,7 @@ func main() {
 		"Disallow remote bases usage in Kustomize overlays. When this flag is enabled, all resources must refer to local files included in the source artifact.")
 	flag.IntVar(&httpRetry, "http-retry", 9, "The maximum number of retries when failing to fetch artifacts over HTTP.")
 	flag.StringVar(&defaultServiceAccount, "default-service-account", "", "Default service account used for impersonation.")
+	flag.StringArrayVar(&disallowedFieldManagers, "override-manager", []string{}, "Field manager disallowed to perform changes on managed resources.")
 
 	clientOptions.BindFlags(flag.CommandLine)
 	logOptions.BindFlags(flag.CommandLine)
@@ -159,9 +162,8 @@ func main() {
 	}
 
 	restConfig := runtimeClient.GetConfigOrDie(clientOptions)
-	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+	mgrConfig := ctrl.Options{
 		Scheme:                        scheme,
-		MetricsBindAddress:            metricsAddr,
 		HealthProbeBindAddress:        healthAddr,
 		LeaderElection:                leaderElectionOptions.Enable,
 		LeaderElectionReleaseOnCancel: leaderElectionOptions.ReleaseOnCancel,
@@ -179,20 +181,30 @@ func main() {
 			ByObject: map[ctrlclient.Object]ctrlcache.ByObject{
 				&kustomizev1.Kustomization{}: {Label: watchSelector},
 			},
-			Namespaces: []string{watchNamespace},
+		},
+		Metrics: metricsserver.Options{
+			BindAddress:   metricsAddr,
+			ExtraHandlers: pprof.GetHandlers(),
 		},
 		Controller: ctrlcfg.Controller{
 			MaxConcurrentReconciles: concurrent,
-			RecoverPanic:            pointer.Bool(true),
+			RecoverPanic:            ptr.To(true),
 		},
-	})
+	}
+
+	if watchNamespace != "" {
+		mgrConfig.Cache.DefaultNamespaces = map[string]ctrlcache.Config{
+			watchNamespace: ctrlcache.Config{},
+		}
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, mgrConfig)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
 	probes.SetupChecks(mgr, setupLog)
-	pprof.SetupHandlers(mgr, setupLog)
 
 	var eventRecorder *events.Recorder
 	if eventRecorder, err = events.NewRecorder(mgr, ctrl.Log, eventsAddr, controllerName); err != nil {
@@ -217,18 +229,19 @@ func main() {
 	}
 
 	if err = (&controller.KustomizationReconciler{
-		ControllerName:        controllerName,
-		DefaultServiceAccount: defaultServiceAccount,
-		Client:                mgr.GetClient(),
-		Metrics:               metricsH,
-		EventRecorder:         eventRecorder,
-		NoCrossNamespaceRefs:  aclOptions.NoCrossNamespaceRefs,
-		NoRemoteBases:         noRemoteBases,
-		FailFast:              failFast,
-		ConcurrentSSA:         concurrentSSA,
-		KubeConfigOpts:        kubeConfigOpts,
-		PollingOpts:           pollingOpts,
-		StatusPoller:          polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), pollingOpts),
+		ControllerName:          controllerName,
+		DefaultServiceAccount:   defaultServiceAccount,
+		Client:                  mgr.GetClient(),
+		Metrics:                 metricsH,
+		EventRecorder:           eventRecorder,
+		NoCrossNamespaceRefs:    aclOptions.NoCrossNamespaceRefs,
+		NoRemoteBases:           noRemoteBases,
+		FailFast:                failFast,
+		ConcurrentSSA:           concurrentSSA,
+		KubeConfigOpts:          kubeConfigOpts,
+		PollingOpts:             pollingOpts,
+		StatusPoller:            polling.NewStatusPoller(mgr.GetClient(), mgr.GetRESTMapper(), pollingOpts),
+		DisallowedFieldManagers: disallowedFieldManagers,
 	}).SetupWithManager(ctx, mgr, controller.KustomizationReconcilerOptions{
 		DependencyRequeueInterval: requeueDependency,
 		HTTPRetry:                 httpRetry,
