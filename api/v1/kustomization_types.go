@@ -99,6 +99,20 @@ type KustomizationSpec struct {
 	// +optional
 	HealthChecks []meta.NamespacedObjectKindReference `json:"healthChecks,omitempty"`
 
+	// NamePrefix will prefix the names of all managed resources.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=200
+	// +kubebuilder:validation:Optional
+	// +optional
+	NamePrefix string `json:"namePrefix,omitempty" yaml:"namePrefix,omitempty"`
+
+	// NameSuffix will suffix the names of all managed resources.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=200
+	// +kubebuilder:validation:Optional
+	// +optional
+	NameSuffix string `json:"nameSuffix,omitempty" yaml:"nameSuffix,omitempty"`
+
 	// Strategic merge and JSON patches, defined as inline YAML objects,
 	// capable of targeting objects based on kind, label and annotation selectors.
 	// +optional
@@ -289,7 +303,6 @@ func (in *Kustomization) SetConditions(conditions []metav1.Condition) {
 }
 
 // +genclient
-// +genclient:Namespaced
 // +kubebuilder:storageversion
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=ks
