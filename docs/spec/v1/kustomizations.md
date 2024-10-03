@@ -116,7 +116,7 @@ Artifact containing the YAML manifests. It has two required fields:
 - `kind`: The Kind of the referred Source object. Supported Source types:
   + [GitRepository](https://github.com/fluxcd/source-controller/blob/main/docs/spec/v1/gitrepositories.md)
   + [OCIRepository](https://github.com/fluxcd/source-controller/blob/main/docs/spec/v1beta2/ocirepositories.md)
-  + [Bucket](https://github.com/fluxcd/source-controller/blob/main/docs/spec/v1beta2/buckets.md)
+  + [Bucket](https://github.com/fluxcd/source-controller/blob/main/docs/spec/v1/buckets.md)
 - `name`: The Name of the referred Source object.
 
 #### Cross-namespace references
@@ -739,12 +739,13 @@ Secret, encrypting the `metadata`, `kind` or `apiVersion` fields is not supporte
 An easy way to do this is by appending `--encrypted-regex '^(data|stringData)$'`
 to your `sops --encrypt` command.
 
-It has two required fields:
+It has two fields:
 
+- `.provider`: The secrets decryption provider to be used. This field is required and
+  the only supported value is `sops`.
 - `.secretRef.name`: The name of the secret that contains the keys to be used for
-   decryption.
-- `.provider`: The secrets decryption provider to be used. The only supported
-   value at the moment is `sops`.
+  decryption. This field can be omitted when using the
+  [global decryption](#controller-global-decryption) option.
 
 ```yaml
 ---
