@@ -2,6 +2,152 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.6.1
+
+**Release date:** 2025-07-08
+
+This patch release fixes a bug introduced in v1.6.0
+that causes SOPS decryption with US Government KMS
+keys to fail with the error:
+
+```
+STS: AssumeRoleWithWebIdentity, https response error\n   StatusCode: 0, RequestID: ,
+request send failed, Post\n \"https://sts.arn.amazonaws.com/\": dial tcp:
+lookupts.arn.amazonaws.com on 10.100.0.10:53: no such host
+```
+
+Fixes:
+- Fix regression in STS endpoint for SOPS decryption with AWS KMS in US Gov partition
+  [#1478](https://github.com/fluxcd/kustomize-controller/pull/1478)
+
+## 1.6.0
+
+**Release date:** 2025-05-28
+
+This minor release comes with various bug fixes and improvements.
+
+Kustomization API now supports object-level workload identity by setting
+`.spec.decryption.serviceAccountName` to the name of a service account
+in the same namespace that has been configured with appropriate cloud
+permissions. For this feature to work, the controller feature gate
+`ObjectLevelWorkloadIdentity` must be enabled. See a complete guide
+[here](https://fluxcd.io/flux/integrations/).
+
+Kustomization API now supports the value `WaitForTermination` for the
+`.spec.deletionPolicy` field. This instructs the controller to wait for the
+deletion of all resources managed by the Kustomization before allowing the
+Kustomization itself to be deleted. See docs
+[here](https://fluxcd.io/flux/components/kustomize/kustomizations/#deletion-policy).
+
+In addition, the Kubernetes dependencies have been updated to v1.33 and
+various other controller dependencies have been updated to their latest version.
+The controller is now built with Go 1.24.
+
+Fixes:
+- Fix performance regression due to using client without cache
+  [#1436](https://github.com/fluxcd/kustomize-controller/pull/1436)
+- Fix secret value showing up in logs
+  [#1372](https://github.com/fluxcd/kustomize-controller/pull/1372)
+
+Improvements:
+- [RFC-0010] Introduce KMS provider decryption with service account
+  [#1426](https://github.com/fluxcd/kustomize-controller/pull/1426)
+  [#1449](https://github.com/fluxcd/kustomize-controller/pull/1449)
+  [#1456](https://github.com/fluxcd/kustomize-controller/pull/1456)
+- Add `WaitForTermination` option to DeletionPolicy
+  [#1444](https://github.com/fluxcd/kustomize-controller/pull/1444)
+- Skip emitting events for suspended Kustomizations
+  [#1396](https://github.com/fluxcd/kustomize-controller/pull/1396)
+- Various dependency updates
+  [#1458](https://github.com/fluxcd/kustomize-controller/pull/1458)
+  [#1448](https://github.com/fluxcd/kustomize-controller/pull/1448)
+  [#1433](https://github.com/fluxcd/kustomize-controller/pull/1433)
+  [#1435](https://github.com/fluxcd/kustomize-controller/pull/1435)
+  [#1429](https://github.com/fluxcd/kustomize-controller/pull/1429)
+  [#1414](https://github.com/fluxcd/kustomize-controller/pull/1414)
+  [#1410](https://github.com/fluxcd/kustomize-controller/pull/1410)
+  [#1401](https://github.com/fluxcd/kustomize-controller/pull/1401)
+
+## 1.5.1
+
+**Release date:** 2025-02-25
+
+This patch release fixes a bug introduced in v1.5.0
+that was causing spurious logging for deprecated API versions
+and sometimes failures on health checks.
+
+In addition, all error logs resulting from SOPS decryption
+failures have been sanitised.
+
+Fixes:
+- Fix secret value showing up in logs
+  [#1372](https://github.com/fluxcd/kustomize-controller/pull/1372)
+- Use lazy restmapper vendored from controller-runtime v0.19
+  [#1377](https://github.com/fluxcd/kustomize-controller/pull/1377)
+
+## 1.5.0
+
+**Release date:** 2025-02-18
+
+This minor release comes with various bug fixes and improvements.
+
+The controller has been updated to Kustomize **v5.6**, please see the
+`kubernetes-sigs/kustomize` [changelog](https://github.com/kubernetes-sigs/kustomize/releases)
+for more details.
+
+The Kustomization API now supports custom health checks for Custom
+Resources through Common Expression Language (CEL) expressions.
+See [docs](https://fluxcd.io/flux/components/kustomize/kustomizations/#health-check-expressions).
+
+The controller now sends an origin revision from OCI artifact
+annotations to notification-controller on events, which is
+useful for updating commit statuses on the notification
+providers that support this feature.
+See [docs](https://fluxcd.io/flux/cheatsheets/oci-artifacts/#git-commit-status-updates).
+
+It is now also possible to control whether or not kustomize-controller
+will orphan resources when a Kustomization is deleted.
+See [docs](https://fluxcd.io/flux/components/kustomize/kustomizations/#deletion-policy).
+
+In addition, the Kubernetes dependencies have been updated to v1.32.1 and
+various other controller dependencies have been updated to their latest
+version.
+
+Fixes:
+- Clarify precedence in Kustomization substituteFrom
+  [#1301](https://github.com/fluxcd/kustomize-controller/pull/1301)
+- Remove deprecated object metrics from controllers
+  [#1305](https://github.com/fluxcd/kustomize-controller/pull/1305)
+
+Improvements:
+- Enable decryption of secrets generated by Kustomize components
+  [#1283](https://github.com/fluxcd/kustomize-controller/pull/1283)
+- Added decryption of Kustomize patches and refactor SOPS tests
+  [#1286](https://github.com/fluxcd/kustomize-controller/pull/1286)
+- Allow control of finalization garbage collection
+  [#1314](https://github.com/fluxcd/kustomize-controller/pull/1314)
+- Add OCI revision to events
+  [#1338](https://github.com/fluxcd/kustomize-controller/pull/1338)
+- [RFC-0009] Add CEL custom healthchecks
+  [#1344](https://github.com/fluxcd/kustomize-controller/pull/1344)
+- Add GroupChangeLog feature gate to fix es indexing cardinality
+  [#1361](https://github.com/fluxcd/kustomize-controller/pull/1361)
+- Various dependency updates
+  [#1302](https://github.com/fluxcd/kustomize-controller/pull/1302)
+  [#1304](https://github.com/fluxcd/kustomize-controller/pull/1304)
+  [#1310](https://github.com/fluxcd/kustomize-controller/pull/1310)
+  [#1313](https://github.com/fluxcd/kustomize-controller/pull/1313)
+  [#1318](https://github.com/fluxcd/kustomize-controller/pull/1318)
+  [#1320](https://github.com/fluxcd/kustomize-controller/pull/1320)
+  [#1330](https://github.com/fluxcd/kustomize-controller/pull/1330)
+  [#1348](https://github.com/fluxcd/kustomize-controller/pull/1348)
+  [#1352](https://github.com/fluxcd/kustomize-controller/pull/1352)
+  [#1354](https://github.com/fluxcd/kustomize-controller/pull/1354)
+  [#1359](https://github.com/fluxcd/kustomize-controller/pull/1359)
+  [#1362](https://github.com/fluxcd/kustomize-controller/pull/1362)
+  [#1364](https://github.com/fluxcd/kustomize-controller/pull/1364)
+  [#1358](https://github.com/fluxcd/kustomize-controller/pull/1358)
+
 ## 1.4.0
 
 **Release date:** 2024-09-27

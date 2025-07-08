@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -209,7 +210,7 @@ aws_session_token: test-token`),
 				},
 			},
 			inspectFunc: func(g *GomegaWithT, decryptor *Decryptor) {
-				g.Expect(decryptor.awsCredsProvider).ToNot(BeNil())
+				g.Expect(decryptor.awsCredentialsProvider).ToNot(BeNil())
 			},
 		},
 		{
@@ -232,7 +233,7 @@ aws_session_token: test-token`),
 				},
 			},
 			inspectFunc: func(g *GomegaWithT, decryptor *Decryptor) {
-				g.Expect(decryptor.gcpCredsJSON).ToNot(BeNil())
+				g.Expect(decryptor.gcpTokenSource).ToNot(BeNil())
 			},
 		},
 		{
@@ -255,7 +256,7 @@ clientSecret: some-client-secret`),
 				},
 			},
 			inspectFunc: func(g *GomegaWithT, decryptor *Decryptor) {
-				g.Expect(decryptor.azureToken).ToNot(BeNil())
+				g.Expect(decryptor.azureTokenCredential).ToNot(BeNil())
 			},
 		},
 		{
@@ -277,7 +278,7 @@ clientSecret: some-client-secret`),
 			},
 			wantErr: true,
 			inspectFunc: func(g *GomegaWithT, decryptor *Decryptor) {
-				g.Expect(decryptor.azureToken).To(BeNil())
+				g.Expect(decryptor.azureTokenCredential).To(BeNil())
 			},
 		},
 		{
@@ -299,7 +300,7 @@ clientSecret: some-client-secret`),
 			},
 			wantErr: true,
 			inspectFunc: func(g *GomegaWithT, decryptor *Decryptor) {
-				g.Expect(decryptor.azureToken).To(BeNil())
+				g.Expect(decryptor.azureTokenCredential).To(BeNil())
 			},
 		},
 		{
@@ -375,7 +376,7 @@ clientSecret: some-client-secret`),
 				},
 			}
 
-			d, cleanup, err := NewTempDecryptor("", cb.Build(), &kustomization)
+			d, cleanup, err := NewTempDecryptor("", cb.Build(), &kustomization, nil)
 			g.Expect(err).ToNot(HaveOccurred())
 			t.Cleanup(cleanup)
 
@@ -390,6 +391,60 @@ clientSecret: some-client-secret`),
 			}
 		})
 	}
+}
+
+func TestDecryptor_SetAuthOptions(t *testing.T) {
+	t.Run("nil decryption settings", func(t *testing.T) {
+		g := NewWithT(t)
+
+		d := &Decryptor{
+			kustomization: &kustomizev1.Kustomization{},
+		}
+
+		d.SetAuthOptions(context.Background())
+
+		g.Expect(d.awsCredentialsProvider).To(BeNil())
+		g.Expect(d.azureTokenCredential).To(BeNil())
+		g.Expect(d.gcpTokenSource).To(BeNil())
+	})
+
+	t.Run("non-sops provider", func(t *testing.T) {
+		g := NewWithT(t)
+
+		d := &Decryptor{
+			kustomization: &kustomizev1.Kustomization{
+				Spec: kustomizev1.KustomizationSpec{
+					Decryption: &kustomizev1.Decryption{},
+				},
+			},
+		}
+
+		d.SetAuthOptions(context.Background())
+
+		g.Expect(d.awsCredentialsProvider).To(BeNil())
+		g.Expect(d.azureTokenCredential).To(BeNil())
+		g.Expect(d.gcpTokenSource).To(BeNil())
+	})
+
+	t.Run("sops provider", func(t *testing.T) {
+		g := NewWithT(t)
+
+		d := &Decryptor{
+			kustomization: &kustomizev1.Kustomization{
+				Spec: kustomizev1.KustomizationSpec{
+					Decryption: &kustomizev1.Decryption{
+						Provider: DecryptionProviderSOPS,
+					},
+				},
+			},
+		}
+
+		d.SetAuthOptions(context.Background())
+
+		g.Expect(d.awsCredentialsProvider).NotTo(BeNil())
+		g.Expect(d.azureTokenCredential).NotTo(BeNil())
+		g.Expect(d.gcpTokenSource).NotTo(BeNil())
+	})
 }
 
 func TestDecryptor_SopsDecryptWithFormat(t *testing.T) {
@@ -550,7 +605,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 			Provider: DecryptionProviderSOPS,
 		}
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus)
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus, nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -591,7 +646,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 			Provider: DecryptionProviderSOPS,
 		}
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus)
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus, nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -626,7 +681,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 			Provider: DecryptionProviderSOPS,
 		}
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus)
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus, nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -661,7 +716,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 			Provider: DecryptionProviderSOPS,
 		}
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus)
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus, nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -703,13 +758,14 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 		got, err := d.DecryptResource(secret)
 		g.Expect(err).ToNot(HaveOccurred())
 		g.Expect(got).ToNot(BeNil())
-		g.Expect(got.GetDataMap()).To(HaveKeyWithValue(corev1.DockerConfigJsonKey, base64.StdEncoding.EncodeToString(plainData)))
+		plainDataWithTrailingNewline := append(plainData, '\n') // https://github.com/getsops/sops/issues/1825
+		g.Expect(got.GetDataMap()).To(HaveKeyWithValue(corev1.DockerConfigJsonKey, base64.StdEncoding.EncodeToString(plainDataWithTrailingNewline)))
 	})
 
 	t.Run("nil resource", func(t *testing.T) {
 		g := NewWithT(t)
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kustomization.DeepCopy())
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kustomization.DeepCopy(), nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -721,7 +777,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 	t.Run("no decryption spec", func(t *testing.T) {
 		g := NewWithT(t)
 
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kustomization.DeepCopy())
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kustomization.DeepCopy(), nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -737,7 +793,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 		kus.Spec.Decryption = &kustomizev1.Decryption{
 			Provider: "not-supported",
 		}
-		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus)
+		d, cleanup, err := NewTempDecryptor("", fake.NewClientBuilder().Build(), kus, nil)
 		g.Expect(err).ToNot(HaveOccurred())
 		t.Cleanup(cleanup)
 
@@ -747,7 +803,7 @@ func TestDecryptor_DecryptResource(t *testing.T) {
 	})
 }
 
-func TestDecryptor_decryptKustomizationEnvSources(t *testing.T) {
+func TestDecryptor_decryptKustomizationSources(t *testing.T) {
 	type file struct {
 		name           string
 		symlink        string
@@ -910,7 +966,7 @@ func TestDecryptor_decryptKustomizationEnvSources(t *testing.T) {
 			}
 
 			visited := make(map[string]struct{}, 0)
-			visit := d.decryptKustomizationEnvSources(visited)
+			visit := d.decryptKustomizationSources(visited)
 			kus := &kustypes.Kustomization{SecretGenerator: tt.secretGenerator}
 
 			err = visit(root, tt.path, kus)
@@ -1594,6 +1650,57 @@ func TestDecryptor_detectFormatFromMarkerBytes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := detectFormatFromMarkerBytes(tt.b); got != tt.want {
 				t.Errorf("detectFormatFromMarkerBytes() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSafeDecrypt(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		mac         string
+		err         string
+		expectedMac string
+		expectedErr string
+	}{
+		{
+			name:        "no error",
+			mac:         "some mac",
+			expectedMac: "some mac",
+		},
+		{
+			name:        "only prefix",
+			err:         "Input string was not in a correct format",
+			expectedErr: "Input string was not in a correct format",
+		},
+		{
+			name:        "only suffix",
+			err:         "The value does not match sops' data format",
+			expectedErr: "The value does not match sops' data format",
+		},
+		{
+			name:        "redacted value",
+			err:         "Input string 1234567897 does not match sops' data format",
+			expectedErr: "Input string <redacted> does not match sops' data format",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			var err error
+			if tt.err != "" {
+				err = errors.New(tt.err)
+			}
+
+			mac, err := safeDecrypt(tt.mac, err)
+
+			g.Expect(mac).To(Equal(tt.expectedMac))
+
+			if tt.expectedErr == "" {
+				g.Expect(err).To(Not(HaveOccurred()))
+			} else {
+				g.Expect(err).To(HaveOccurred())
+				g.Expect(err.Error()).To(Equal(tt.expectedErr))
 			}
 		})
 	}
