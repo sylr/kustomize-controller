@@ -90,7 +90,7 @@ stringData:
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
 			KubeConfig: &meta.KubeConfigReference{
-				SecretRef: meta.SecretKeyReference{
+				SecretRef: &meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -120,6 +120,7 @@ stringData:
 
 	t.Run("fails to reconcile from cross-namespace source", func(t *testing.T) {
 		reconciler.NoCrossNamespaceRefs = true
+		defer func() { reconciler.NoCrossNamespaceRefs = false }()
 
 		revision = "v2.0.0"
 		err = applyGitRepository(repositoryName, artifact, revision)
@@ -132,5 +133,6 @@ stringData:
 		}, timeout, time.Second).Should(BeTrue())
 
 		g.Expect(readyCondition.Reason).To(Equal(apiacl.AccessDeniedReason))
+		g.Expect(apimeta.IsStatusConditionTrue(resultK.Status.Conditions, meta.StalledCondition)).Should(BeTrue())
 	})
 }

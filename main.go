@@ -55,6 +55,7 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	"github.com/fluxcd/kustomize-controller/internal/controller"
 	"github.com/fluxcd/kustomize-controller/internal/features"
+	intruntime "github.com/fluxcd/kustomize-controller/internal/runtime"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -79,26 +80,29 @@ func main() {
 	)
 
 	var (
-		metricsAddr             string
-		eventsAddr              string
-		healthAddr              string
-		concurrent              int
-		concurrentSSA           int
-		requeueDependency       time.Duration
-		clientOptions           runtimeClient.Options
-		kubeConfigOpts          runtimeClient.KubeConfigOptions
-		logOptions              logger.Options
-		leaderElectionOptions   leaderelection.Options
-		rateLimiterOptions      runtimeCtrl.RateLimiterOptions
-		watchOptions            runtimeCtrl.WatchOptions
-		intervalJitterOptions   jitter.IntervalOptions
-		aclOptions              acl.Options
-		noRemoteBases           bool
-		httpRetry               int
-		defaultServiceAccount   string
-		featureGates            feathelper.FeatureGates
-		disallowedFieldManagers []string
-		tokenCacheOptions       pkgcache.TokenFlags
+		metricsAddr                     string
+		eventsAddr                      string
+		healthAddr                      string
+		concurrent                      int
+		concurrentSSA                   int
+		requeueDependency               time.Duration
+		clientOptions                   runtimeClient.Options
+		kubeConfigOpts                  runtimeClient.KubeConfigOptions
+		logOptions                      logger.Options
+		leaderElectionOptions           leaderelection.Options
+		rateLimiterOptions              runtimeCtrl.RateLimiterOptions
+		watchOptions                    runtimeCtrl.WatchOptions
+		intervalJitterOptions           jitter.IntervalOptions
+		aclOptions                      acl.Options
+		noRemoteBases                   bool
+		httpRetry                       int
+		defaultServiceAccount           string
+		defaultDecryptionServiceAccount string
+		defaultKubeConfigServiceAccount string
+		sopsAgeSecret                   string
+		featureGates                    feathelper.FeatureGates
+		disallowedFieldManagers         []string
+		tokenCacheOptions               pkgcache.TokenFlags
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
@@ -110,7 +114,10 @@ func main() {
 	flag.BoolVar(&noRemoteBases, "no-remote-bases", false,
 		"Disallow remote bases usage in Kustomize overlays. When this flag is enabled, all resources must refer to local files included in the source artifact.")
 	flag.IntVar(&httpRetry, "http-retry", 9, "The maximum number of retries when failing to fetch artifacts over HTTP.")
-	flag.StringVar(&defaultServiceAccount, "default-service-account", "", "Default service account used for impersonation.")
+	flag.StringVar(&defaultServiceAccount, auth.ControllerFlagDefaultServiceAccount, "", "Default service account used for impersonation.")
+	flag.StringVar(&defaultDecryptionServiceAccount, auth.ControllerFlagDefaultDecryptionServiceAccount, "", "Default service account used for decryption.")
+	flag.StringVar(&defaultKubeConfigServiceAccount, auth.ControllerFlagDefaultKubeConfigServiceAccount, "", "Default service account used for kubeconfig.")
+	flag.StringVar(&sopsAgeSecret, "sops-age-secret", "", "The name of a Kubernetes secret in the RUNTIME_NAMESPACE containing a SOPS age decryption key for fallback usage.")
 	flag.StringArrayVar(&disallowedFieldManagers, "override-manager", []string{}, "Field manager disallowed to perform changes on managed resources.")
 
 	clientOptions.BindFlags(flag.CommandLine)
@@ -143,6 +150,20 @@ func main() {
 		auth.EnableObjectLevelWorkloadIdentity()
 	}
 
+	// NOTE: defaultServiceAccount is used for regular impersonation, not workload identity lockdown
+
+	if defaultDecryptionServiceAccount != "" {
+		auth.SetDefaultDecryptionServiceAccount(defaultDecryptionServiceAccount)
+	}
+	if defaultKubeConfigServiceAccount != "" {
+		auth.SetDefaultKubeConfigServiceAccount(defaultKubeConfigServiceAccount)
+	}
+
+	if auth.InconsistentObjectLevelConfiguration() {
+		setupLog.Error(auth.ErrInconsistentObjectLevelConfiguration, "invalid configuration")
+		os.Exit(1)
+	}
+
 	if err := intervalJitterOptions.SetGlobalJitter(nil); err != nil {
 		setupLog.Error(err, "unable to set global jitter")
 		os.Exit(1)
@@ -150,12 +171,18 @@ func main() {
 
 	watchNamespace := ""
 	if !watchOptions.AllNamespaces {
-		watchNamespace = os.Getenv("RUNTIME_NAMESPACE")
+		watchNamespace = intruntime.Namespace()
 	}
 
 	watchSelector, err := runtimeCtrl.GetWatchSelector(watchOptions)
 	if err != nil {
 		setupLog.Error(err, "unable to configure watch label selector for manager")
+		os.Exit(1)
+	}
+
+	watchConfigsPredicate, err := runtimeCtrl.GetWatchConfigsPredicate(watchOptions)
+	if err != nil {
+		setupLog.Error(err, "unable to configure watch configs label selector for controller")
 		os.Exit(1)
 	}
 
@@ -255,6 +282,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	additiveCELDependencyCheck, err := features.Enabled(features.AdditiveCELDependencyCheck)
+	if err != nil {
+		setupLog.Error(err, "unable to check feature gate "+features.AdditiveCELDependencyCheck)
+		os.Exit(1)
+	}
+
+	allowExternalArtifact, err := features.Enabled(features.ExternalArtifact)
+	if err != nil {
+		setupLog.Error(err, "unable to check feature gate "+features.ExternalArtifact)
+		os.Exit(1)
+	}
+
 	var tokenCache *pkgcache.TokenCache
 	if tokenCacheOptions.MaxSize > 0 {
 		var err error
@@ -269,27 +308,33 @@ func main() {
 	}
 
 	if err = (&controller.KustomizationReconciler{
-		ControllerName:          controllerName,
-		DefaultServiceAccount:   defaultServiceAccount,
-		Client:                  mgr.GetClient(),
-		Mapper:                  restMapper,
-		APIReader:               mgr.GetAPIReader(),
-		Metrics:                 metricsH,
-		EventRecorder:           eventRecorder,
-		NoCrossNamespaceRefs:    aclOptions.NoCrossNamespaceRefs,
-		NoRemoteBases:           noRemoteBases,
-		FailFast:                failFast,
-		ConcurrentSSA:           concurrentSSA,
-		KubeConfigOpts:          kubeConfigOpts,
-		ClusterReader:           clusterReader,
-		DisallowedFieldManagers: disallowedFieldManagers,
-		StrictSubstitutions:     strictSubstitutions,
-		GroupChangeLog:          groupChangeLog,
-		TokenCache:              tokenCache,
+		AdditiveCELDependencyCheck: additiveCELDependencyCheck,
+		AllowExternalArtifact:      allowExternalArtifact,
+		APIReader:                  mgr.GetAPIReader(),
+		ArtifactFetchRetries:       httpRetry,
+		Client:                     mgr.GetClient(),
+		ClusterReader:              clusterReader,
+		ConcurrentSSA:              concurrentSSA,
+		ControllerName:             controllerName,
+		DefaultServiceAccount:      defaultServiceAccount,
+		DependencyRequeueInterval:  requeueDependency,
+		DisallowedFieldManagers:    disallowedFieldManagers,
+		EventRecorder:              eventRecorder,
+		FailFast:                   failFast,
+		GroupChangeLog:             groupChangeLog,
+		KubeConfigOpts:             kubeConfigOpts,
+		Mapper:                     restMapper,
+		Metrics:                    metricsH,
+		NoCrossNamespaceRefs:       aclOptions.NoCrossNamespaceRefs,
+		NoRemoteBases:              noRemoteBases,
+		SOPSAgeSecret:              sopsAgeSecret,
+		StatusManager:              fmt.Sprintf("gotk-%s", controllerName),
+		StrictSubstitutions:        strictSubstitutions,
+		TokenCache:                 tokenCache,
 	}).SetupWithManager(ctx, mgr, controller.KustomizationReconcilerOptions{
-		DependencyRequeueInterval: requeueDependency,
-		HTTPRetry:                 httpRetry,
-		RateLimiter:               runtimeCtrl.GetRateLimiter(rateLimiterOptions),
+		RateLimiter:            runtimeCtrl.GetRateLimiter(rateLimiterOptions),
+		WatchConfigsPredicate:  watchConfigsPredicate,
+		WatchExternalArtifacts: allowExternalArtifact,
 	}); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", controllerName)
 		os.Exit(1)

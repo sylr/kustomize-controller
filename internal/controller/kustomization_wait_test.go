@@ -105,7 +105,7 @@ parameters:
 			Interval: metav1.Duration{Duration: 2 * time.Minute},
 			Path:     "./",
 			KubeConfig: &meta.KubeConfigReference{
-				SecretRef: meta.SecretKeyReference{
+				SecretRef: &meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -136,6 +136,11 @@ parameters:
 		g.Expect(resultK.Status.ObservedGeneration).To(BeIdenticalTo(resultK.Generation))
 
 		kstatusCheck.CheckErr(ctx, resultK)
+
+		g.Expect(resultK.Status.History).To(HaveLen(1))
+		g.Expect(resultK.Status.History[0].TotalReconciliations).To(BeEquivalentTo(1))
+		g.Expect(resultK.Status.History[0].LastReconciledStatus).To(Equal(meta.ReconciliationSucceededReason))
+		g.Expect(resultK.Status.History[0].Metadata).To(ContainElements(revision))
 	})
 
 	t.Run("reports progressing status", func(t *testing.T) {
@@ -192,6 +197,11 @@ parameters:
 		g.Expect(resultK.Status.ObservedGeneration).To(BeIdenticalTo(resultK.Generation - 1))
 
 		kstatusCheck.CheckErr(ctx, resultK)
+
+		g.Expect(resultK.Status.History).To(HaveLen(2))
+		g.Expect(resultK.Status.History[0].TotalReconciliations).To(BeEquivalentTo(1))
+		g.Expect(resultK.Status.History[0].LastReconciledStatus).To(Equal(meta.HealthCheckFailedReason))
+		g.Expect(resultK.Status.History[0].Metadata).To(ContainElements(revision))
 	})
 
 	t.Run("emits unhealthy event", func(t *testing.T) {
@@ -228,6 +238,11 @@ parameters:
 		g.Expect(resultK.Status.ObservedGeneration).To(BeIdenticalTo(resultK.Generation))
 
 		kstatusCheck.CheckErr(ctx, resultK)
+
+		g.Expect(resultK.Status.History).To(HaveLen(2))
+		g.Expect(resultK.Status.History[0].TotalReconciliations).To(BeEquivalentTo(2))
+		g.Expect(resultK.Status.History[0].LastReconciledStatus).To(Equal(meta.ReconciliationSucceededReason))
+		g.Expect(resultK.Status.History[0].Metadata).To(ContainElements(revision))
 	})
 
 	t.Run("emits recovery event", func(t *testing.T) {
@@ -258,6 +273,11 @@ parameters:
 		g.Expect(resultK.Status.LastAttemptedRevision).To(BeIdenticalTo(resultK.Status.LastAppliedRevision))
 
 		kstatusCheck.CheckErr(ctx, resultK)
+
+		g.Expect(resultK.Status.History).To(HaveLen(3))
+		g.Expect(resultK.Status.History[0].TotalReconciliations).To(BeEquivalentTo(1))
+		g.Expect(resultK.Status.History[0].LastReconciledStatus).To(Equal(meta.ReconciliationSucceededReason))
+		g.Expect(resultK.Status.History[0].Metadata).To(ContainElements(revision))
 	})
 
 	t.Run("emits event for the new revision", func(t *testing.T) {
@@ -331,7 +351,7 @@ data: {}
 			Interval: metav1.Duration{Duration: 2 * time.Minute},
 			Path:     "./",
 			KubeConfig: &meta.KubeConfigReference{
-				SecretRef: meta.SecretKeyReference{
+				SecretRef: &meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -411,7 +431,7 @@ func TestKustomizationReconciler_RESTMapper(t *testing.T) {
 			Kind:      sourcev1.GitRepositoryKind,
 		},
 		KubeConfig: &meta.KubeConfigReference{
-			SecretRef: meta.SecretKeyReference{
+			SecretRef: &meta.SecretKeyReference{
 				Name: "kubeconfig",
 			},
 		},

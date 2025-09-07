@@ -22,11 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
 	securejoin "github.com/cyphar/filepath-securejoin"
+	celtypes "github.com/google/cel-go/common/types"
+	"github.com/opencontainers/go-digest"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -36,14 +37,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kuberecorder "k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/fluxcd/cli-utils/pkg/kstatus/polling"
@@ -53,6 +49,7 @@ import (
 	eventv1 "github.com/fluxcd/pkg/apis/event/v1beta1"
 	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/fluxcd/pkg/auth"
+	authutils "github.com/fluxcd/pkg/auth/utils"
 	"github.com/fluxcd/pkg/cache"
 	"github.com/fluxcd/pkg/http/fetch"
 	generator "github.com/fluxcd/pkg/kustomize"
@@ -63,7 +60,6 @@ import (
 	runtimeCtrl "github.com/fluxcd/pkg/runtime/controller"
 	"github.com/fluxcd/pkg/runtime/jitter"
 	"github.com/fluxcd/pkg/runtime/patch"
-	"github.com/fluxcd/pkg/runtime/predicates"
 	"github.com/fluxcd/pkg/runtime/statusreaders"
 	"github.com/fluxcd/pkg/ssa"
 	"github.com/fluxcd/pkg/ssa/normalize"
@@ -74,7 +70,9 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	intcache "github.com/fluxcd/kustomize-controller/internal/cache"
 	"github.com/fluxcd/kustomize-controller/internal/decryptor"
+	"github.com/fluxcd/kustomize-controller/internal/features"
 	"github.com/fluxcd/kustomize-controller/internal/inventory"
+	intruntime "github.com/fluxcd/kustomize-controller/internal/runtime"
 )
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;create;update;patch;delete
@@ -92,85 +90,37 @@ type KustomizationReconciler struct {
 	kuberecorder.EventRecorder
 	runtimeCtrl.Metrics
 
-	artifactFetchRetries int
-	requeueDependency    time.Duration
+	// Kubernetes options
 
-	Mapper                  apimeta.RESTMapper
-	APIReader               client.Reader
-	ClusterReader           engine.ClusterReaderFactory
-	ControllerName          string
-	statusManager           string
+	APIReader      client.Reader
+	ClusterReader  engine.ClusterReaderFactory
+	ConcurrentSSA  int
+	ControllerName string
+	KubeConfigOpts runtimeClient.KubeConfigOptions
+	Mapper         apimeta.RESTMapper
+	StatusManager  string
+
+	// Multi-tenancy and security options
+
+	DefaultServiceAccount   string
+	DisallowedFieldManagers []string
 	NoCrossNamespaceRefs    bool
 	NoRemoteBases           bool
-	FailFast                bool
-	DefaultServiceAccount   string
-	KubeConfigOpts          runtimeClient.KubeConfigOptions
-	ConcurrentSSA           int
-	DisallowedFieldManagers []string
-	StrictSubstitutions     bool
-	GroupChangeLog          bool
+	SOPSAgeSecret           string
 	TokenCache              *cache.TokenCache
-}
 
-// KustomizationReconcilerOptions contains options for the KustomizationReconciler.
-type KustomizationReconcilerOptions struct {
-	HTTPRetry                 int
+	// Retry and requeue options
+
+	ArtifactFetchRetries      int
 	DependencyRequeueInterval time.Duration
-	RateLimiter               workqueue.TypedRateLimiter[reconcile.Request]
-}
 
-func (r *KustomizationReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, opts KustomizationReconcilerOptions) error {
-	const (
-		ociRepositoryIndexKey string = ".metadata.ociRepository"
-		gitRepositoryIndexKey string = ".metadata.gitRepository"
-		bucketIndexKey        string = ".metadata.bucket"
-	)
+	// Feature gates
 
-	// Index the Kustomizations by the OCIRepository references they (may) point at.
-	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, ociRepositoryIndexKey,
-		r.indexBy(sourcev1.OCIRepositoryKind)); err != nil {
-		return fmt.Errorf("failed setting index fields: %w", err)
-	}
-
-	// Index the Kustomizations by the GitRepository references they (may) point at.
-	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, gitRepositoryIndexKey,
-		r.indexBy(sourcev1.GitRepositoryKind)); err != nil {
-		return fmt.Errorf("failed setting index fields: %w", err)
-	}
-
-	// Index the Kustomizations by the Bucket references they (may) point at.
-	if err := mgr.GetCache().IndexField(ctx, &kustomizev1.Kustomization{}, bucketIndexKey,
-		r.indexBy(sourcev1.BucketKind)); err != nil {
-		return fmt.Errorf("failed setting index fields: %w", err)
-	}
-
-	r.requeueDependency = opts.DependencyRequeueInterval
-	r.statusManager = fmt.Sprintf("gotk-%s", r.ControllerName)
-	r.artifactFetchRetries = opts.HTTPRetry
-
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&kustomizev1.Kustomization{}, builder.WithPredicates(
-			predicate.Or(predicate.GenerationChangedPredicate{}, predicates.ReconcileRequestedPredicate{}),
-		)).
-		Watches(
-			&sourcev1.OCIRepository{},
-			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(ociRepositoryIndexKey)),
-			builder.WithPredicates(SourceRevisionChangePredicate{}),
-		).
-		Watches(
-			&sourcev1.GitRepository{},
-			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(gitRepositoryIndexKey)),
-			builder.WithPredicates(SourceRevisionChangePredicate{}),
-		).
-		Watches(
-			&sourcev1.Bucket{},
-			handler.EnqueueRequestsFromMapFunc(r.requestsForRevisionChangeOf(bucketIndexKey)),
-			builder.WithPredicates(SourceRevisionChangePredicate{}),
-		).
-		WithOptions(controller.Options{
-			RateLimiter: opts.RateLimiter,
-		}).
-		Complete(r)
+	AdditiveCELDependencyCheck bool
+	AllowExternalArtifact      bool
+	FailFast                   bool
+	GroupChangeLog             bool
+	StrictSubstitutions        bool
 }
 
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -236,17 +186,15 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Configure custom health checks.
 	statusReaders, err := cel.PollerWithCustomHealthChecks(ctx, obj.Spec.HealthCheckExprs)
 	if err != nil {
-		const msg = "Reconciliation failed terminally due to configuration error"
-		errMsg := fmt.Sprintf("%s: %v", msg, err)
+		errMsg := fmt.Sprintf("%s: %v", TerminalErrorMessage, err)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.InvalidCELExpressionReason, "%s", errMsg)
 		conditions.MarkStalled(obj, meta.InvalidCELExpressionReason, "%s", errMsg)
 		obj.Status.ObservedGeneration = obj.Generation
-		log.Error(err, msg)
 		r.event(obj, "", "", eventv1.EventSeverityError, errMsg, nil)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, reconcile.TerminalError(err)
 	}
 
-	// Check object-level workload identity feature gate.
+	// Check object-level workload identity feature gate and decryption with service account.
 	if d := obj.Spec.Decryption; d != nil && d.ServiceAccountName != "" && !auth.IsObjectLevelWorkloadIdentityEnabled() {
 		const gate = auth.FeatureGateObjectLevelWorkloadIdentity
 		const msgFmt = "to use spec.decryption.serviceAccountName for decryption authentication please enable the %s feature gate in the controller"
@@ -271,9 +219,9 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 		if acl.IsAccessDenied(err) {
 			conditions.MarkFalse(obj, meta.ReadyCondition, apiacl.AccessDeniedReason, "%s", err)
-			log.Error(err, "Access denied to cross-namespace source")
+			conditions.MarkStalled(obj, apiacl.AccessDeniedReason, "%s", err)
 			r.event(obj, "", "", eventv1.EventSeverityError, err.Error(), nil)
-			return ctrl.Result{RequeueAfter: obj.GetRetryInterval()}, nil
+			return ctrl.Result{}, reconcile.TerminalError(err)
 		}
 
 		// Retry with backoff on transient errors.
@@ -282,10 +230,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Requeue the reconciliation if the source artifact is not found.
 	if artifactSource.GetArtifact() == nil {
-		msg := fmt.Sprintf("Source artifact not found, retrying in %s", r.requeueDependency.String())
+		msg := fmt.Sprintf("Source artifact not found, retrying in %s", r.DependencyRequeueInterval.String())
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ArtifactFailedReason, "%s", msg)
 		log.Info(msg)
-		return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
+		return ctrl.Result{RequeueAfter: r.DependencyRequeueInterval}, nil
 	}
 	revision := artifactSource.GetArtifact().Revision
 	originRevision := getOriginRevision(artifactSource)
@@ -293,11 +241,22 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Check dependencies and requeue the reconciliation if the check fails.
 	if len(obj.Spec.DependsOn) > 0 {
 		if err := r.checkDependencies(ctx, obj, artifactSource); err != nil {
+			// Check if this is a terminal error that should not trigger retries
+			if errors.Is(err, reconcile.TerminalError(nil)) {
+				errMsg := fmt.Sprintf("%s: %v", TerminalErrorMessage, err)
+				conditions.MarkFalse(obj, meta.ReadyCondition, meta.InvalidCELExpressionReason, "%s", errMsg)
+				conditions.MarkStalled(obj, meta.InvalidCELExpressionReason, "%s", errMsg)
+				obj.Status.ObservedGeneration = obj.Generation
+				r.event(obj, revision, originRevision, eventv1.EventSeverityError, errMsg, nil)
+				return ctrl.Result{}, err
+			}
+
+			// Retry on transient errors.
 			conditions.MarkFalse(obj, meta.ReadyCondition, meta.DependencyNotReadyReason, "%s", err)
-			msg := fmt.Sprintf("Dependencies do not meet ready condition, retrying in %s", r.requeueDependency.String())
+			msg := fmt.Sprintf("Dependencies do not meet ready condition, retrying in %s", r.DependencyRequeueInterval.String())
 			log.Info(msg)
 			r.event(obj, revision, originRevision, eventv1.EventSeverityInfo, msg, nil)
-			return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
+			return ctrl.Result{RequeueAfter: r.DependencyRequeueInterval}, nil
 		}
 		log.Info("All dependencies are ready, proceeding with reconciliation")
 	}
@@ -307,10 +266,10 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Requeue at the specified retry interval if the artifact tarball is not found.
 	if errors.Is(reconcileErr, fetch.ErrFileNotFound) {
-		msg := fmt.Sprintf("Source is not ready, artifact not found, retrying in %s", r.requeueDependency.String())
+		msg := fmt.Sprintf("Source is not ready, artifact not found, retrying in %s", r.DependencyRequeueInterval.String())
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ArtifactFailedReason, "%s", msg)
 		log.Info(msg)
-		return ctrl.Result{RequeueAfter: r.requeueDependency}, nil
+		return ctrl.Result{RequeueAfter: r.DependencyRequeueInterval}, nil
 	}
 
 	// Broadcast the reconciliation failure and requeue at the specified retry interval.
@@ -335,6 +294,7 @@ func (r *KustomizationReconciler) reconcile(
 	src sourcev1.Source,
 	patcher *patch.SerialPatcher,
 	statusReaders []func(apimeta.RESTMapper) engine.StatusReader) error {
+	reconcileStart := time.Now()
 	log := ctrl.LoggerFrom(ctx)
 
 	// Update status with the reconciliation progress.
@@ -368,13 +328,14 @@ func (r *KustomizationReconciler) reconcile(
 	}(tmpDir)
 
 	// Download artifact and extract files to the tmp dir.
-	if err = fetch.NewArchiveFetcherWithLogger(
-		r.artifactFetchRetries,
-		tar.UnlimitedUntarSize,
-		tar.UnlimitedUntarSize,
-		os.Getenv("SOURCE_CONTROLLER_LOCALHOST"),
-		ctrl.LoggerFrom(ctx),
-	).Fetch(src.GetArtifact().URL, src.GetArtifact().Digest, tmpDir); err != nil {
+	fetcher := fetch.New(
+		fetch.WithLogger(ctrl.LoggerFrom(ctx)),
+		fetch.WithRetries(r.ArtifactFetchRetries),
+		fetch.WithMaxDownloadSize(tar.UnlimitedUntarSize),
+		fetch.WithUntar(tar.WithMaxUntarSize(tar.UnlimitedUntarSize)),
+		fetch.WithHostnameOverwrite(os.Getenv("SOURCE_CONTROLLER_LOCALHOST")),
+	)
+	if err = fetcher.Fetch(src.GetArtifact().URL, src.GetArtifact().Digest, tmpDir); err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ArtifactFailedReason, "%s", err)
 		return err
 	}
@@ -410,8 +371,9 @@ func (r *KustomizationReconciler) reconcile(
 	}
 	if obj.Spec.KubeConfig != nil {
 		mustImpersonate = true
+		provider := r.getProviderRESTConfigFetcher(obj)
 		impersonatorOpts = append(impersonatorOpts,
-			runtimeClient.WithKubeConfig(obj.Spec.KubeConfig, r.KubeConfigOpts, obj.GetNamespace()))
+			runtimeClient.WithKubeConfig(obj.Spec.KubeConfig, r.KubeConfigOpts, obj.GetNamespace(), provider))
 	}
 	if r.ClusterReader != nil || len(statusReaders) > 0 {
 		impersonatorOpts = append(impersonatorOpts,
@@ -451,6 +413,13 @@ func (r *KustomizationReconciler) reconcile(
 		return err
 	}
 
+	// Calculate the digest of the built resources for history tracking.
+	checksum := digest.FromBytes(resources).String()
+	historyMeta := map[string]string{"revision": revision}
+	if originRevision != "" {
+		historyMeta["originRevision"] = originRevision
+	}
+
 	// Convert the build result into Kubernetes unstructured objects.
 	objects, err := ssautil.ReadObjects(bytes.NewReader(resources))
 	if err != nil {
@@ -476,6 +445,7 @@ func (r *KustomizationReconciler) reconcile(
 	// Validate and apply resources in stages.
 	drifted, changeSet, err := r.apply(ctx, resourceManager, obj, revision, originRevision, objects)
 	if err != nil {
+		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
 		return err
 	}
@@ -484,6 +454,7 @@ func (r *KustomizationReconciler) reconcile(
 	newInventory := inventory.New()
 	err = inventory.AddChangeSet(newInventory, changeSet)
 	if err != nil {
+		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
 		return err
 	}
@@ -494,12 +465,14 @@ func (r *KustomizationReconciler) reconcile(
 	// Detect stale resources which are subject to garbage collection.
 	staleObjects, err := inventory.Diff(oldInventory, newInventory)
 	if err != nil {
+		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
 		return err
 	}
 
 	// Run garbage collection for stale resources that do not have pruning disabled.
 	if _, err := r.prune(ctx, resourceManager, obj, revision, originRevision, staleObjects); err != nil {
+		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.PruneFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.PruneFailedReason, "%s", err)
 		return err
 	}
@@ -515,6 +488,7 @@ func (r *KustomizationReconciler) reconcile(
 		isNewRevision,
 		drifted,
 		changeSet.ToObjMetadataSet()); err != nil {
+		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.HealthCheckFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.HealthCheckFailedReason, "%s", err)
 		return err
 	}
@@ -528,55 +502,131 @@ func (r *KustomizationReconciler) reconcile(
 		meta.ReadyCondition,
 		meta.ReconciliationSucceededReason,
 		"Applied revision: %s", revision)
+	obj.Status.History.Upsert(checksum,
+		time.Now(),
+		time.Since(reconcileStart),
+		meta.ReconciliationSucceededReason,
+		historyMeta)
 
 	return nil
 }
 
+// checkDependencies checks if the dependencies of the current Kustomization are ready.
+// To be considered ready, a dependencies must meet the following criteria:
+// - The dependency exists in the API server.
+// - The CEL expression (if provided) must evaluate to true.
+// - The dependency observed generation must match the current generation.
+// - The dependency Ready condition must be true.
+// - The dependency last applied revision must match the current source artifact revision.
 func (r *KustomizationReconciler) checkDependencies(ctx context.Context,
 	obj *kustomizev1.Kustomization,
 	source sourcev1.Source) error {
-	for _, d := range obj.Spec.DependsOn {
-		if d.Namespace == "" {
-			d.Namespace = obj.GetNamespace()
+
+	// Convert the Kustomization object to Unstructured for CEL evaluation.
+	objMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return fmt.Errorf("failed to convert Kustomization to unstructured: %w", err)
+	}
+
+	for _, depRef := range obj.Spec.DependsOn {
+		// Check if the dependency exists by querying
+		// the API server bypassing the cache.
+		if depRef.Namespace == "" {
+			depRef.Namespace = obj.GetNamespace()
 		}
-		dName := types.NamespacedName{
-			Namespace: d.Namespace,
-			Name:      d.Name,
+		depName := types.NamespacedName{
+			Namespace: depRef.Namespace,
+			Name:      depRef.Name,
 		}
-		var k kustomizev1.Kustomization
-		err := r.APIReader.Get(ctx, dName, &k)
+		var dep kustomizev1.Kustomization
+		err := r.APIReader.Get(ctx, depName, &dep)
 		if err != nil {
-			return fmt.Errorf("dependency '%s' not found: %w", dName, err)
+			return fmt.Errorf("dependency '%s' not found: %w", depName, err)
 		}
 
-		if len(k.Status.Conditions) == 0 || k.Generation != k.Status.ObservedGeneration {
-			return fmt.Errorf("dependency '%s' is not ready", dName)
+		// Evaluate the CEL expression (if specified) to determine if the dependency is ready.
+		if depRef.ReadyExpr != "" {
+			ready, err := r.evalReadyExpr(ctx, depRef.ReadyExpr, objMap, &dep)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				return fmt.Errorf("dependency '%s' is not ready according to readyExpr eval", depName)
+			}
 		}
 
-		if !apimeta.IsStatusConditionTrue(k.Status.Conditions, meta.ReadyCondition) {
-			return fmt.Errorf("dependency '%s' is not ready", dName)
+		// Skip the built-in readiness check if the CEL expression is provided
+		// and the AdditiveCELDependencyCheck feature gate is not enabled.
+		if depRef.ReadyExpr != "" && !r.AdditiveCELDependencyCheck {
+			continue
 		}
 
-		srcNamespace := k.Spec.SourceRef.Namespace
+		// Check if the dependency observed generation is up to date
+		// and if the dependency is in a ready state.
+		if len(dep.Status.Conditions) == 0 || dep.Generation != dep.Status.ObservedGeneration {
+			return fmt.Errorf("dependency '%s' is not ready", depName)
+		}
+		if !apimeta.IsStatusConditionTrue(dep.Status.Conditions, meta.ReadyCondition) {
+			return fmt.Errorf("dependency '%s' is not ready", depName)
+		}
+
+		// Check if the dependency source matches the current source
+		// and if so, verify that the last applied revision of the dependency
+		// matches the current source artifact revision.
+		srcNamespace := dep.Spec.SourceRef.Namespace
 		if srcNamespace == "" {
-			srcNamespace = k.GetNamespace()
+			srcNamespace = dep.GetNamespace()
 		}
-		dSrcNamespace := obj.Spec.SourceRef.Namespace
-		if dSrcNamespace == "" {
-			dSrcNamespace = obj.GetNamespace()
+		depSrcNamespace := obj.Spec.SourceRef.Namespace
+		if depSrcNamespace == "" {
+			depSrcNamespace = obj.GetNamespace()
 		}
-
-		if k.Spec.SourceRef.Name == obj.Spec.SourceRef.Name &&
-			srcNamespace == dSrcNamespace &&
-			k.Spec.SourceRef.Kind == obj.Spec.SourceRef.Kind &&
-			!source.GetArtifact().HasRevision(k.Status.LastAppliedRevision) {
-			return fmt.Errorf("dependency '%s' revision is not up to date", dName)
+		if dep.Spec.SourceRef.Name == obj.Spec.SourceRef.Name &&
+			srcNamespace == depSrcNamespace &&
+			dep.Spec.SourceRef.Kind == obj.Spec.SourceRef.Kind &&
+			!source.GetArtifact().HasRevision(dep.Status.LastAppliedRevision) {
+			return fmt.Errorf("dependency '%s' revision is not up to date", depName)
 		}
 	}
 
 	return nil
 }
 
+// evalReadyExpr evaluates the CEL expression for the dependency readiness check.
+func (r *KustomizationReconciler) evalReadyExpr(
+	ctx context.Context,
+	expr string,
+	selfMap map[string]any,
+	dep *kustomizev1.Kustomization,
+) (bool, error) {
+	const (
+		selfName = "self"
+		depName  = "dep"
+	)
+
+	celExpr, err := cel.NewExpression(expr,
+		cel.WithCompile(),
+		cel.WithOutputType(celtypes.BoolType),
+		cel.WithStructVariables(selfName, depName))
+	if err != nil {
+		return false, reconcile.TerminalError(fmt.Errorf("failed to evaluate dependency %s: %w", dep.Name, err))
+	}
+
+	depMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dep)
+	if err != nil {
+		return false, fmt.Errorf("failed to convert %s object to map: %w", depName, err)
+	}
+
+	vars := map[string]any{
+		selfName: selfMap,
+		depName:  depMap,
+	}
+
+	return celExpr.EvaluateBoolean(ctx, vars)
+}
+
+// getSource resolves the source reference and returns the source object containing the artifact.
+// It returns an error if the source is not found or if access is denied.
 func (r *KustomizationReconciler) getSource(ctx context.Context,
 	obj *kustomizev1.Kustomization) (sourcev1.Source, error) {
 	var src sourcev1.Source
@@ -589,10 +639,18 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 		Name:      obj.Spec.SourceRef.Name,
 	}
 
+	// Check if cross-namespace references are allowed.
 	if r.NoCrossNamespaceRefs && sourceNamespace != obj.GetNamespace() {
 		return src, acl.AccessDeniedError(
 			fmt.Sprintf("can't access '%s/%s', cross-namespace references have been blocked",
 				obj.Spec.SourceRef.Kind, namespacedName))
+	}
+
+	// Check if ExternalArtifact kind is allowed.
+	if obj.Spec.SourceRef.Kind == sourcev1.ExternalArtifactKind && !r.AllowExternalArtifact {
+		return src, acl.AccessDeniedError(
+			fmt.Sprintf("can't access '%s/%s', %s feature gate is disabled",
+				obj.Spec.SourceRef.Kind, namespacedName, features.ExternalArtifact))
 	}
 
 	switch obj.Spec.SourceRef.Kind {
@@ -626,6 +684,16 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 			return src, fmt.Errorf("unable to get source '%s': %w", namespacedName, err)
 		}
 		src = &bucket
+	case sourcev1.ExternalArtifactKind:
+		var ea sourcev1.ExternalArtifact
+		err := r.Client.Get(ctx, namespacedName, &ea)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return src, err
+			}
+			return src, fmt.Errorf("unable to get source '%s': %w", namespacedName, err)
+		}
+		src = &ea
 	default:
 		return src, fmt.Errorf("source `%s` kind '%s' not supported",
 			obj.Spec.SourceRef.Name, obj.Spec.SourceRef.Kind)
@@ -642,7 +710,18 @@ func (r *KustomizationReconciler) generate(obj unstructured.Unstructured,
 func (r *KustomizationReconciler) build(ctx context.Context,
 	obj *kustomizev1.Kustomization, u unstructured.Unstructured,
 	workDir, dirPath string) ([]byte, error) {
-	dec, cleanup, err := decryptor.NewTempDecryptor(workDir, r.Client, obj, r.TokenCache)
+
+	// Build decryptor.
+	decryptorOpts := []decryptor.Option{
+		decryptor.WithRoot(workDir),
+	}
+	if r.TokenCache != nil {
+		decryptorOpts = append(decryptorOpts, decryptor.WithTokenCache(*r.TokenCache))
+	}
+	if name, ns := r.SOPSAgeSecret, intruntime.Namespace(); name != "" && ns != "" {
+		decryptorOpts = append(decryptorOpts, decryptor.WithSOPSAgeSecret(name, ns))
+	}
+	dec, cleanup, err := decryptor.New(r.Client, obj, decryptorOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -794,119 +873,43 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		},
 	}
 
-	// contains only CRDs and Namespaces
-	var defStage []*unstructured.Unstructured
-
-	// contains only Kubernetes Class types e.g.: RuntimeClass, PriorityClass,
-	// StorageClass, VolumeSnapshotClass, IngressClass, GatewayClass, ClusterClass, etc
-	var classStage []*unstructured.Unstructured
-
-	// contains all objects except for CRDs, Namespaces and Class type objects
-	var resStage []*unstructured.Unstructured
-
-	// contains the objects' metadata after apply
-	resultSet := ssa.NewChangeSet()
-
 	for _, u := range objects {
 		if decryptor.IsEncryptedSecret(u) {
 			return false, nil,
 				fmt.Errorf("%s is SOPS encrypted, configuring decryption is required for this secret to be reconciled",
 					ssautil.FmtUnstructured(u))
 		}
-
-		switch {
-		case ssautil.IsClusterDefinition(u):
-			defStage = append(defStage, u)
-		case strings.HasSuffix(u.GetKind(), "Class"):
-			classStage = append(classStage, u)
-		default:
-			resStage = append(resStage, u)
-		}
-
 	}
 
+	// contains the objects' metadata after apply
+	resultSet := ssa.NewChangeSet()
 	var changeSetLog strings.Builder
 
-	// validate, apply and wait for CRDs and Namespaces to register
-	if len(defStage) > 0 {
-		changeSet, err := manager.ApplyAll(ctx, defStage, applyOpts)
-		if err != nil {
-			return false, nil, err
-		}
+	if len(objects) > 0 {
+		changeSet, err := manager.ApplyAllStaged(ctx, objects, applyOpts)
 
 		if changeSet != nil && len(changeSet.Entries) > 0 {
 			resultSet.Append(changeSet.Entries)
 
-			if r.GroupChangeLog {
-				log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToGroupedMap())
-			} else {
-				log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToMap())
-			}
+			// filter out the objects that have not changed
 			for _, change := range changeSet.Entries {
 				if HasChanged(change.Action) {
 					changeSetLog.WriteString(change.String() + "\n")
 				}
 			}
-
-			if err := manager.WaitForSet(changeSet.ToObjMetadataSet(), ssa.WaitOptions{
-				Interval: 2 * time.Second,
-				Timeout:  obj.GetTimeout(),
-			}); err != nil {
-				return false, nil, err
-			}
-		}
-	}
-
-	// validate, apply and wait for Class type objects to register
-	if len(classStage) > 0 {
-		changeSet, err := manager.ApplyAll(ctx, classStage, applyOpts)
-		if err != nil {
-			return false, nil, err
 		}
 
-		if changeSet != nil && len(changeSet.Entries) > 0 {
-			resultSet.Append(changeSet.Entries)
-
-			if r.GroupChangeLog {
-				log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToGroupedMap())
-			} else {
-				log.Info("server-side apply for cluster class types completed", "output", changeSet.ToMap())
-			}
-			for _, change := range changeSet.Entries {
-				if HasChanged(change.Action) {
-					changeSetLog.WriteString(change.String() + "\n")
-				}
-			}
-
-			if err := manager.WaitForSet(changeSet.ToObjMetadataSet(), ssa.WaitOptions{
-				Interval: 2 * time.Second,
-				Timeout:  obj.GetTimeout(),
-			}); err != nil {
-				return false, nil, err
-			}
-		}
-	}
-
-	// sort by kind, validate and apply all the others objects
-	sort.Sort(ssa.SortableUnstructureds(resStage))
-	if len(resStage) > 0 {
-		changeSet, err := manager.ApplyAll(ctx, resStage, applyOpts)
+		// include the change log in the error message in case af a partial apply
 		if err != nil {
 			return false, nil, fmt.Errorf("%w\n%s", err, changeSetLog.String())
 		}
 
+		// log all applied objects
 		if changeSet != nil && len(changeSet.Entries) > 0 {
-			resultSet.Append(changeSet.Entries)
-
 			if r.GroupChangeLog {
-				log.Info("server-side apply for cluster definitions completed", "output", changeSet.ToGroupedMap())
+				log.Info("server-side apply completed", "output", changeSet.ToGroupedMap(), "revision", revision)
 			} else {
 				log.Info("server-side apply completed", "output", changeSet.ToMap(), "revision", revision)
-			}
-			for _, change := range changeSet.Entries {
-				if HasChanged(change.Action) {
-					changeSetLog.WriteString(change.String() + "\n")
-				}
 			}
 		}
 	}
@@ -1076,8 +1079,9 @@ func (r *KustomizationReconciler) finalize(ctx context.Context,
 		}
 		if obj.Spec.KubeConfig != nil {
 			mustImpersonate = true
+			provider := r.getProviderRESTConfigFetcher(obj)
 			impersonatorOpts = append(impersonatorOpts,
-				runtimeClient.WithKubeConfig(obj.Spec.KubeConfig, r.KubeConfigOpts, obj.GetNamespace()))
+				runtimeClient.WithKubeConfig(obj.Spec.KubeConfig, r.KubeConfigOpts, obj.GetNamespace(), provider))
 		}
 		if r.ClusterReader != nil {
 			impersonatorOpts = append(impersonatorOpts, runtimeClient.WithPolling(r.ClusterReader))
@@ -1222,7 +1226,7 @@ func (r *KustomizationReconciler) patch(ctx context.Context,
 	patchOpts = append(patchOpts,
 		patch.WithOwnedConditions{Conditions: ownedConditions},
 		patch.WithForceOverwriteConditions{},
-		patch.WithFieldOwner(r.statusManager),
+		patch.WithFieldOwner(r.StatusManager),
 	)
 
 	// Patch the object status, conditions and finalizers.
@@ -1260,6 +1264,27 @@ func (r *KustomizationReconciler) getClientAndPoller(
 	})
 
 	return r.Client, poller
+}
+
+// getProviderRESTConfigFetcher returns a ProviderRESTConfigFetcher for the
+// Kustomization object, which is used to fetch the kubeconfig for a ConfigMap
+// reference in the Kustomization spec.
+func (r *KustomizationReconciler) getProviderRESTConfigFetcher(obj *kustomizev1.Kustomization) runtimeClient.ProviderRESTConfigFetcher {
+	var provider runtimeClient.ProviderRESTConfigFetcher
+	if kc := obj.Spec.KubeConfig; kc != nil && kc.SecretRef == nil && kc.ConfigMapRef != nil {
+		var opts []auth.Option
+		if r.TokenCache != nil {
+			involvedObject := cache.InvolvedObject{
+				Kind:      kustomizev1.KustomizationKind,
+				Name:      obj.GetName(),
+				Namespace: obj.GetNamespace(),
+				Operation: intcache.OperationFetchKubeConfig,
+			}
+			opts = append(opts, auth.WithCache(*r.TokenCache, involvedObject))
+		}
+		provider = runtimeClient.ProviderRESTConfigFetcher(authutils.GetRESTConfigFetcher(opts...))
+	}
+	return provider
 }
 
 // getOriginRevision returns the origin revision of the source artifact,

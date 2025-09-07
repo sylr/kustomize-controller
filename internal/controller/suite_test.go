@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	controllerLog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/yaml"
 
 	"github.com/fluxcd/pkg/apis/meta"
@@ -57,6 +58,7 @@ const (
 	reconciliationInterval = time.Second * 5
 	vaultVersion           = "1.13.2"
 	overrideManagerName    = "node-fetch"
+	sopsAgeSecret          = "sops-age-secret"
 )
 
 var (
@@ -172,17 +174,21 @@ func TestMain(m *testing.M) {
 		kstatusInProgressCheck = kcheck.NewInProgressChecker(testEnv.Client)
 		kstatusInProgressCheck.DisableFetch = true
 		reconciler = &KustomizationReconciler{
-			ControllerName:          controllerName,
-			Client:                  testEnv,
-			Mapper:                  testEnv.GetRESTMapper(),
-			APIReader:               testEnv,
-			EventRecorder:           testEnv.GetEventRecorderFor(controllerName),
-			Metrics:                 testMetricsH,
-			ConcurrentSSA:           4,
-			DisallowedFieldManagers: []string{overrideManagerName},
+			ControllerName:            controllerName,
+			StatusManager:             fmt.Sprintf("gotk-%s", controllerName),
+			Client:                    testEnv,
+			Mapper:                    testEnv.GetRESTMapper(),
+			APIReader:                 testEnv,
+			EventRecorder:             testEnv.GetEventRecorderFor(controllerName),
+			Metrics:                   testMetricsH,
+			DependencyRequeueInterval: 2 * time.Second,
+			ConcurrentSSA:             4,
+			DisallowedFieldManagers:   []string{overrideManagerName},
+			SOPSAgeSecret:             sopsAgeSecret,
 		}
 		if err := (reconciler).SetupWithManager(ctx, testEnv, KustomizationReconcilerOptions{
-			DependencyRequeueInterval: 2 * time.Second,
+			WatchConfigsPredicate:  predicate.Not(predicate.Funcs{}),
+			WatchExternalArtifacts: true,
 		}); err != nil {
 			panic(fmt.Sprintf("Failed to start KustomizationReconciler: %v", err))
 		}
@@ -327,7 +333,7 @@ func applyGitRepository(objKey client.ObjectKey, artifactName string,
 				Reason:             sourcev1.GitOperationSucceedReason,
 			},
 		},
-		Artifact: &sourcev1.Artifact{
+		Artifact: &meta.Artifact{
 			Path:           url,
 			URL:            url,
 			Revision:       revision,

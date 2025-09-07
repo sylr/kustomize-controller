@@ -87,7 +87,7 @@ stringData:
 			Interval: metav1.Duration{Duration: reconciliationInterval},
 			Path:     "./",
 			KubeConfig: &meta.KubeConfigReference{
-				SecretRef: meta.SecretKeyReference{
+				SecretRef: &meta.SecretKeyReference{
 					Name: "kubeconfig",
 				},
 			},
@@ -114,6 +114,15 @@ stringData:
 	g.Expect(readyCondition.Reason).To(Equal(meta.ReconciliationSucceededReason))
 
 	g.Expect(resultK.Status.LastAppliedOriginRevision).To(Equal("orev"))
+
+	g.Expect(resultK.Status.History).To(HaveLen(1))
+	g.Expect(resultK.Status.History[0].Digest).ToNot(BeEmpty())
+	g.Expect(resultK.Status.History[0].TotalReconciliations).To(BeEquivalentTo(1))
+	g.Expect(resultK.Status.History[0].FirstReconciled.Time).ToNot(BeZero())
+	g.Expect(resultK.Status.History[0].LastReconciled.Time).ToNot(BeZero())
+	g.Expect(resultK.Status.History[0].LastReconciledStatus).To(Equal(meta.ReconciliationSucceededReason))
+	g.Expect(resultK.Status.History[0].LastReconciledDuration.Duration).To(BeNumerically(">", 0))
+	g.Expect(resultK.Status.History[0].Metadata).To(ContainElements(revision, "orev"))
 
 	events := getEvents(kustomizationKey.Name, nil)
 	g.Expect(events).To(Not(BeEmpty()))

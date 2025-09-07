@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+package runtime
 
-const (
-	OCIArtifactOriginRevisionAnnotation = "org.opencontainers.image.revision"
-	TerminalErrorMessage                = "Reconciliation failed terminally due to configuration error"
-)
+import "os"
+
+// Namespace returns the namespace where the controller is running.
+func Namespace() string {
+	return os.Getenv("RUNTIME_NAMESPACE")
+}
