@@ -160,6 +160,14 @@ vet:
 generate: controller-gen
 	cd api; $(CONTROLLER_GEN) object:headerFile="../hack/boilerplate.go.txt" paths="./..."
 
+# Verify that the working directory is clean
+verify: fmt
+	@if [ ! "$$(git status --porcelain --untracked-files=no)" = "" ]; then \
+		echo "working directory is dirty:"; \
+		git --no-pager diff; \
+		exit 1; \
+	fi
+
 comma := ,
 
 # Build the docker image

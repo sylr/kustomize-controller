@@ -29,13 +29,7 @@ import (
 //
 // ref:
 // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html
-<<<<<<< HEAD
-const arnPattern = `^arn:aws[\w-]*:kms:(.+):[0-9]+:(key|alias)/.+$`
-
-var arnRegex = regexp.MustCompile(arnPattern)
-=======
 var arnRegex = regexp.MustCompile(`^arn:aws[\w-]*:kms:(.+):[0-9]+:(key|alias)/.+$`)
->>>>>>> v1.7.0-rc.1
 
 // GetRegionFromKMSARN extracts the region from a KMS ARN.
 func GetRegionFromKMSARN(arn string) string {

@@ -55,7 +55,6 @@ import (
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	"github.com/fluxcd/kustomize-controller/internal/controller"
 	"github.com/fluxcd/kustomize-controller/internal/features"
-	intruntime "github.com/fluxcd/kustomize-controller/internal/runtime"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -171,7 +170,7 @@ func main() {
 
 	watchNamespace := ""
 	if !watchOptions.AllNamespaces {
-		watchNamespace = intruntime.Namespace()
+		watchNamespace = os.Getenv(runtimeCtrl.EnvRuntimeNamespace)
 	}
 
 	watchSelector, err := runtimeCtrl.GetWatchSelector(watchOptions)
@@ -294,6 +293,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	cancelHealthCheckOnNewRevision, err := features.Enabled(features.CancelHealthCheckOnNewRevision)
+	if err != nil {
+		setupLog.Error(err, "unable to check feature gate "+features.CancelHealthCheckOnNewRevision)
+		os.Exit(1)
+	}
+
 	var tokenCache *pkgcache.TokenCache
 	if tokenCacheOptions.MaxSize > 0 {
 		var err error
@@ -308,29 +313,30 @@ func main() {
 	}
 
 	if err = (&controller.KustomizationReconciler{
-		AdditiveCELDependencyCheck: additiveCELDependencyCheck,
-		AllowExternalArtifact:      allowExternalArtifact,
-		APIReader:                  mgr.GetAPIReader(),
-		ArtifactFetchRetries:       httpRetry,
-		Client:                     mgr.GetClient(),
-		ClusterReader:              clusterReader,
-		ConcurrentSSA:              concurrentSSA,
-		ControllerName:             controllerName,
-		DefaultServiceAccount:      defaultServiceAccount,
-		DependencyRequeueInterval:  requeueDependency,
-		DisallowedFieldManagers:    disallowedFieldManagers,
-		EventRecorder:              eventRecorder,
-		FailFast:                   failFast,
-		GroupChangeLog:             groupChangeLog,
-		KubeConfigOpts:             kubeConfigOpts,
-		Mapper:                     restMapper,
-		Metrics:                    metricsH,
-		NoCrossNamespaceRefs:       aclOptions.NoCrossNamespaceRefs,
-		NoRemoteBases:              noRemoteBases,
-		SOPSAgeSecret:              sopsAgeSecret,
-		StatusManager:              fmt.Sprintf("gotk-%s", controllerName),
-		StrictSubstitutions:        strictSubstitutions,
-		TokenCache:                 tokenCache,
+		AdditiveCELDependencyCheck:     additiveCELDependencyCheck,
+		AllowExternalArtifact:          allowExternalArtifact,
+		CancelHealthCheckOnNewRevision: cancelHealthCheckOnNewRevision,
+		APIReader:                      mgr.GetAPIReader(),
+		ArtifactFetchRetries:           httpRetry,
+		Client:                         mgr.GetClient(),
+		ClusterReader:                  clusterReader,
+		ConcurrentSSA:                  concurrentSSA,
+		ControllerName:                 controllerName,
+		DefaultServiceAccount:          defaultServiceAccount,
+		DependencyRequeueInterval:      requeueDependency,
+		DisallowedFieldManagers:        disallowedFieldManagers,
+		EventRecorder:                  eventRecorder,
+		FailFast:                       failFast,
+		GroupChangeLog:                 groupChangeLog,
+		KubeConfigOpts:                 kubeConfigOpts,
+		Mapper:                         restMapper,
+		Metrics:                        metricsH,
+		NoCrossNamespaceRefs:           aclOptions.NoCrossNamespaceRefs,
+		NoRemoteBases:                  noRemoteBases,
+		SOPSAgeSecret:                  sopsAgeSecret,
+		StatusManager:                  fmt.Sprintf("gotk-%s", controllerName),
+		StrictSubstitutions:            strictSubstitutions,
+		TokenCache:                     tokenCache,
 	}).SetupWithManager(ctx, mgr, controller.KustomizationReconcilerOptions{
 		RateLimiter:            runtimeCtrl.GetRateLimiter(rateLimiterOptions),
 		WatchConfigsPredicate:  watchConfigsPredicate,

@@ -68,11 +68,9 @@ import (
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
-	intcache "github.com/fluxcd/kustomize-controller/internal/cache"
 	"github.com/fluxcd/kustomize-controller/internal/decryptor"
 	"github.com/fluxcd/kustomize-controller/internal/features"
 	"github.com/fluxcd/kustomize-controller/internal/inventory"
-	intruntime "github.com/fluxcd/kustomize-controller/internal/runtime"
 )
 
 // +kubebuilder:rbac:groups=kustomize.toolkit.fluxcd.io,resources=kustomizations,verbs=get;list;watch;create;update;patch;delete
@@ -116,11 +114,12 @@ type KustomizationReconciler struct {
 
 	// Feature gates
 
-	AdditiveCELDependencyCheck bool
-	AllowExternalArtifact      bool
-	FailFast                   bool
-	GroupChangeLog             bool
-	StrictSubstitutions        bool
+	AdditiveCELDependencyCheck     bool
+	AllowExternalArtifact          bool
+	CancelHealthCheckOnNewRevision bool
+	FailFast                       bool
+	GroupChangeLog                 bool
+	StrictSubstitutions            bool
 }
 
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -443,11 +442,22 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// Validate and apply resources in stages.
-	drifted, changeSet, err := r.apply(ctx, resourceManager, obj, revision, originRevision, objects)
+	drifted, changeSetWithSkipped, err := r.apply(ctx, resourceManager, obj, revision, originRevision, objects)
 	if err != nil {
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
 		return err
+	}
+
+	// Filter out skipped entries from the change set.
+	changeSet := ssa.NewChangeSet()
+	skippedSet := make(map[object.ObjMetadata]struct{})
+	for _, entry := range changeSetWithSkipped.Entries {
+		if entry.Action == ssa.SkippedAction {
+			skippedSet[entry.ObjMetadata] = struct{}{}
+		} else {
+			changeSet.Add(entry)
+		}
 	}
 
 	// Create an inventory from the reconciled resources.
@@ -463,7 +473,7 @@ func (r *KustomizationReconciler) reconcile(
 	obj.Status.Inventory = newInventory
 
 	// Detect stale resources which are subject to garbage collection.
-	staleObjects, err := inventory.Diff(oldInventory, newInventory)
+	staleObjects, err := inventory.Diff(oldInventory, newInventory, skippedSet)
 	if err != nil {
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
@@ -718,7 +728,7 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 	if r.TokenCache != nil {
 		decryptorOpts = append(decryptorOpts, decryptor.WithTokenCache(*r.TokenCache))
 	}
-	if name, ns := r.SOPSAgeSecret, intruntime.Namespace(); name != "" && ns != "" {
+	if name, ns := r.SOPSAgeSecret, os.Getenv(runtimeCtrl.EnvRuntimeNamespace); name != "" && ns != "" {
 		decryptorOpts = append(decryptorOpts, decryptor.WithSOPSAgeSecret(name, ns))
 	}
 	dec, cleanup, err := decryptor.New(r.Client, obj, decryptorOpts...)
@@ -974,7 +984,39 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	}
 
 	// Check the health with a default timeout of 30sec shorter than the reconciliation interval.
-	if err := manager.WaitForSet(toCheck, ssa.WaitOptions{
+	healthCtx := ctx
+	if r.CancelHealthCheckOnNewRevision {
+		// Create a cancellable context for health checks that monitors for new revisions
+		var cancel context.CancelFunc
+		healthCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+
+		// Start monitoring for new revisions to allow early cancellation
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-healthCtx.Done():
+					return
+				case <-ticker.C:
+					// Get the latest source artifact
+					latestSrc, err := r.getSource(ctx, obj)
+					if err == nil && latestSrc.GetArtifact() != nil {
+						if newRevision := latestSrc.GetArtifact().Revision; newRevision != revision {
+							const msg = "New revision detected during health check, cancelling"
+							r.event(obj, revision, originRevision, eventv1.EventSeverityInfo, msg, nil)
+							ctrl.LoggerFrom(ctx).Info(msg, "current", revision, "new", newRevision)
+							cancel()
+							return
+						}
+					}
+				}
+			}
+		}()
+	}
+	if err := manager.WaitForSetWithContext(healthCtx, toCheck, ssa.WaitOptions{
 		Interval: 5 * time.Second,
 		Timeout:  obj.GetTimeout(),
 		FailFast: r.FailFast,
@@ -1149,7 +1191,7 @@ func (r *KustomizationReconciler) finalize(ctx context.Context,
 	controllerutil.RemoveFinalizer(obj, kustomizev1.KustomizationFinalizer)
 
 	// Cleanup caches.
-	for _, op := range intcache.AllOperations {
+	for _, op := range kustomizev1.AllMetrics {
 		r.TokenCache.DeleteEventsForObject(kustomizev1.KustomizationKind, obj.GetName(), obj.GetNamespace(), op)
 	}
 
@@ -1278,7 +1320,7 @@ func (r *KustomizationReconciler) getProviderRESTConfigFetcher(obj *kustomizev1.
 				Kind:      kustomizev1.KustomizationKind,
 				Name:      obj.GetName(),
 				Namespace: obj.GetNamespace(),
-				Operation: intcache.OperationFetchKubeConfig,
+				Operation: kustomizev1.MetricFetchKubeConfig,
 			}
 			opts = append(opts, auth.WithCache(*r.TokenCache, involvedObject))
 		}
