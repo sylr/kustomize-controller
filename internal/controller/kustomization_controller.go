@@ -326,13 +326,19 @@ func (r *KustomizationReconciler) reconcile(
 		}
 	}(tmpDir)
 
+	// Set the artifact URL hostname override for localhost access.
+	sourceLocalhost := os.Getenv("SOURCE_CONTROLLER_LOCALHOST")
+	if strings.Contains(src.GetArtifact().URL, "//source-watcher") {
+		sourceLocalhost = os.Getenv("SOURCE_WATCHER_LOCALHOST")
+	}
+
 	// Download artifact and extract files to the tmp dir.
 	fetcher := fetch.New(
 		fetch.WithLogger(ctrl.LoggerFrom(ctx)),
 		fetch.WithRetries(r.ArtifactFetchRetries),
 		fetch.WithMaxDownloadSize(tar.UnlimitedUntarSize),
 		fetch.WithUntar(tar.WithMaxUntarSize(tar.UnlimitedUntarSize)),
-		fetch.WithHostnameOverwrite(os.Getenv("SOURCE_CONTROLLER_LOCALHOST")),
+		fetch.WithHostnameOverwrite(sourceLocalhost),
 	)
 	if err = fetcher.Fetch(src.GetArtifact().URL, src.GetArtifact().Digest, tmpDir); err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ArtifactFailedReason, "%s", err)
@@ -765,7 +771,7 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 		if obj.Spec.Decryption != nil {
 			outRes, err := dec.DecryptResource(res)
 			if err != nil {
-				return nil, fmt.Errorf("decryption failed for '%s': %w", res.GetName(), err)
+				return nil, fmt.Errorf("decryption failed for '%s/%s': %w", res.GetGvk(), res.GetName(), err)
 			}
 
 			if outRes != nil {
@@ -781,7 +787,7 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 			outRes, err := generator.SubstituteVariables(ctx, r.Client, u, res,
 				generator.SubstituteWithStrict(r.StrictSubstitutions))
 			if err != nil {
-				return nil, fmt.Errorf("post build failed for '%s': %w", res.GetName(), err)
+				return nil, fmt.Errorf("post build failed for '%s/%s': %w", res.GetGvk(), res.GetName(), err)
 			}
 
 			if outRes != nil {

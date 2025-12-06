@@ -2,6 +2,55 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.7.3
+
+**Release date:** 2025-11-19
+
+This patch release comes with a series of bug fixes, including
+Azure Workload Identity in Azure China Cloud. It also adds a
+feature gate to disable the ConfigMap and Secret watchers,
+`DisableConfigWatchers`.
+
+Fixes:
+- Fix: skip trying to decrypt remote patches as local
+  [#1548](https://github.com/fluxcd/kustomize-controller/pull/1548)
+- Add GVK to error message
+  [#1547](https://github.com/fluxcd/kustomize-controller/pull/1547)
+
+Improvements:
+- Add feature gate for disabling config watchers
+  [#1553](https://github.com/fluxcd/kustomize-controller/pull/1553)
+- Upgrade k8s to 1.34.2 and c-r to 0.22.4
+  [#1551](https://github.com/fluxcd/kustomize-controller/pull/1551)
+
+## 1.7.2
+
+**Release date:** 2025-10-28
+
+This patch release allows running kustomize-controller
+on the same loopback interface as source-watcher.
+
+Improvements:
+- Allow fetching artifacts from a local source-watcher
+  [#1539](https://github.com/fluxcd/kustomize-controller/pull/1539)
+
+## 1.7.1
+
+**Release date:** 2025-10-08
+
+This patch release comes with various dependency updates.
+
+The controller is now built with Go 1.25.2 which includes
+fixes for vulnerabilities in the Go stdlib:
+[CVE-2025-58183](https://github.com/golang/go/issues/75677),
+[CVE-2025-58188](https://github.com/golang/go/issues/75675)
+and many others. The full list of security fixes can be found
+[here](https://groups.google.com/g/golang-announce/c/4Emdl2iQ_bI/m/qZN5nc-mBgAJ).
+
+Improvements:
+- Update dependencies to Kubernetes v1.34.1 and Go 1.25.2
+  [#1530](https://github.com/fluxcd/kustomize-controller/pull/1530)
+
 ## 1.7.0
 
 **Release date:** 2025-09-24
