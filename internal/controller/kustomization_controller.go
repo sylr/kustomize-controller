@@ -34,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	kuberecorder "k8s.io/client-go/tools/record"
@@ -69,7 +70,6 @@ import (
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	"github.com/fluxcd/kustomize-controller/internal/decryptor"
-	"github.com/fluxcd/kustomize-controller/internal/features"
 	"github.com/fluxcd/kustomize-controller/internal/inventory"
 )
 
@@ -90,13 +90,14 @@ type KustomizationReconciler struct {
 
 	// Kubernetes options
 
-	APIReader      client.Reader
-	ClusterReader  engine.ClusterReaderFactory
-	ConcurrentSSA  int
-	ControllerName string
-	KubeConfigOpts runtimeClient.KubeConfigOptions
-	Mapper         apimeta.RESTMapper
-	StatusManager  string
+	APIReader        client.Reader
+	ClusterReader    engine.ClusterReaderFactory
+	ConcurrentSSA    int
+	ControllerName   string
+	KubeConfigOpts   runtimeClient.KubeConfigOptions
+	Mapper           apimeta.RESTMapper
+	StatusManager    string
+	CustomStageKinds map[schema.GroupKind]struct{}
 
 	// Multi-tenancy and security options
 
@@ -114,12 +115,12 @@ type KustomizationReconciler struct {
 
 	// Feature gates
 
-	AdditiveCELDependencyCheck     bool
-	AllowExternalArtifact          bool
-	CancelHealthCheckOnNewRevision bool
-	FailFast                       bool
-	GroupChangeLog                 bool
-	StrictSubstitutions            bool
+	AdditiveCELDependencyCheck bool
+	AllowExternalArtifact      bool
+	DirectSourceFetch          bool
+	FailFast                   bool
+	GroupChangeLog             bool
+	StrictSubstitutions        bool
 }
 
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, retErr error) {
@@ -183,7 +184,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Configure custom health checks.
-	statusReaders, err := cel.PollerWithCustomHealthChecks(ctx, obj.Spec.HealthCheckExprs)
+	statusReader, err := cel.NewStatusReader(obj.Spec.HealthCheckExprs)
 	if err != nil {
 		errMsg := fmt.Sprintf("%s: %v", TerminalErrorMessage, err)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.InvalidCELExpressionReason, "%s", errMsg)
@@ -261,7 +262,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Reconcile the latest revision.
-	reconcileErr := r.reconcile(ctx, obj, artifactSource, patcher, statusReaders)
+	reconcileErr := r.reconcile(ctx, obj, artifactSource, patcher, statusReader)
 
 	// Requeue at the specified retry interval if the artifact tarball is not found.
 	if errors.Is(reconcileErr, fetch.ErrFileNotFound) {
@@ -269,6 +270,19 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ArtifactFailedReason, "%s", msg)
 		log.Info(msg)
 		return ctrl.Result{RequeueAfter: r.DependencyRequeueInterval}, nil
+	}
+
+	// Handle health check cancellation.
+	if qes := new(runtimeCtrl.QueueEventSource); errors.As(reconcileErr, &qes) {
+		conditions.MarkFalse(obj,
+			meta.ReadyCondition,
+			meta.HealthCheckCanceledReason,
+			"New reconciliation triggered by %s/%s/%s", qes.Kind, qes.Namespace, qes.Name)
+		ctrl.LoggerFrom(ctx).Info("New reconciliation triggered, canceling health checks", "trigger", qes)
+		r.event(obj, revision, originRevision, eventv1.EventSeverityInfo,
+			fmt.Sprintf("Health checks canceled due to new reconciliation triggered by %s/%s/%s",
+				qes.Kind, qes.Namespace, qes.Name), nil)
+		return ctrl.Result{}, nil
 	}
 
 	// Broadcast the reconciliation failure and requeue at the specified retry interval.
@@ -292,7 +306,7 @@ func (r *KustomizationReconciler) reconcile(
 	obj *kustomizev1.Kustomization,
 	src sourcev1.Source,
 	patcher *patch.SerialPatcher,
-	statusReaders []func(apimeta.RESTMapper) engine.StatusReader) error {
+	statusReader func(apimeta.RESTMapper) engine.StatusReader) error {
 	reconcileStart := time.Now()
 	log := ctrl.LoggerFrom(ctx)
 
@@ -380,9 +394,9 @@ func (r *KustomizationReconciler) reconcile(
 		impersonatorOpts = append(impersonatorOpts,
 			runtimeClient.WithKubeConfig(obj.Spec.KubeConfig, r.KubeConfigOpts, obj.GetNamespace(), provider))
 	}
-	if r.ClusterReader != nil || len(statusReaders) > 0 {
+	if r.ClusterReader != nil || len(obj.Spec.HealthCheckExprs) > 0 {
 		impersonatorOpts = append(impersonatorOpts,
-			runtimeClient.WithPolling(r.ClusterReader, statusReaders...))
+			runtimeClient.WithPolling(r.ClusterReader, statusReader))
 	}
 	impersonation := runtimeClient.NewImpersonator(r.Client, impersonatorOpts...)
 
@@ -392,7 +406,7 @@ func (r *KustomizationReconciler) reconcile(
 	if mustImpersonate {
 		kubeClient, statusPoller, err = impersonation.GetClient(ctx)
 	} else {
-		kubeClient, statusPoller = r.getClientAndPoller(statusReaders)
+		kubeClient, statusPoller = r.getClientAndPoller(obj, statusReader)
 	}
 	if err != nil {
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
@@ -503,7 +517,13 @@ func (r *KustomizationReconciler) reconcile(
 		originRevision,
 		isNewRevision,
 		drifted,
-		changeSet.ToObjMetadataSet()); err != nil {
+		changeSet.ToObjMetadataSet(),
+		ssautil.ExtractJobsWithTTL(objects)); err != nil {
+
+		if errors.Is(err, &runtimeCtrl.QueueEventSource{}) {
+			return err
+		}
+
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.HealthCheckFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.HealthCheckFailedReason, "%s", err)
 		return err
@@ -666,13 +686,19 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 	if obj.Spec.SourceRef.Kind == sourcev1.ExternalArtifactKind && !r.AllowExternalArtifact {
 		return src, acl.AccessDeniedError(
 			fmt.Sprintf("can't access '%s/%s', %s feature gate is disabled",
-				obj.Spec.SourceRef.Kind, namespacedName, features.ExternalArtifact))
+				obj.Spec.SourceRef.Kind, namespacedName, runtimeCtrl.FeatureGateExternalArtifact))
+	}
+
+	// Use APIReader to bypass the cache when DirectSourceFetch is enabled.
+	var reader client.Reader = r.Client
+	if r.DirectSourceFetch {
+		reader = r.APIReader
 	}
 
 	switch obj.Spec.SourceRef.Kind {
 	case sourcev1.OCIRepositoryKind:
 		var repository sourcev1.OCIRepository
-		err := r.Client.Get(ctx, namespacedName, &repository)
+		err := reader.Get(ctx, namespacedName, &repository)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return src, err
@@ -682,7 +708,7 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 		src = &repository
 	case sourcev1.GitRepositoryKind:
 		var repository sourcev1.GitRepository
-		err := r.Client.Get(ctx, namespacedName, &repository)
+		err := reader.Get(ctx, namespacedName, &repository)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return src, err
@@ -692,7 +718,7 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 		src = &repository
 	case sourcev1.BucketKind:
 		var bucket sourcev1.Bucket
-		err := r.Client.Get(ctx, namespacedName, &bucket)
+		err := reader.Get(ctx, namespacedName, &bucket)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return src, err
@@ -702,7 +728,7 @@ func (r *KustomizationReconciler) getSource(ctx context.Context,
 		src = &bucket
 	case sourcev1.ExternalArtifactKind:
 		var ea sourcev1.ExternalArtifact
-		err := r.Client.Get(ctx, namespacedName, &ea)
+		err := reader.Get(ctx, namespacedName, &ea)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				return src, err
@@ -835,6 +861,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 	applyOpts.ForceSelector = map[string]string{
 		fmt.Sprintf("%s/force", kustomizev1.GroupVersion.Group): kustomizev1.EnabledValue,
 	}
+	applyOpts.CustomStageKinds = r.CustomStageKinds
 
 	fieldManagers := []ssa.FieldManager{
 		{
@@ -890,7 +917,7 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 	}
 
 	for _, u := range objects {
-		if decryptor.IsEncryptedSecret(u) {
+		if decryptor.IsEncryptedSecret(u) && !decryptor.IsDecryptionDisabled(u.GetAnnotations()) {
 			return false, nil,
 				fmt.Errorf("%s is SOPS encrypted, configuring decryption is required for this secret to be reconciled",
 					ssautil.FmtUnstructured(u))
@@ -947,7 +974,8 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	originRevision string,
 	isNewRevision bool,
 	drifted bool,
-	objects object.ObjMetadataSet) error {
+	objects object.ObjMetadataSet,
+	jobsWithTTL object.ObjMetadataSet) error {
 	if len(obj.Spec.HealthChecks) == 0 && !obj.Spec.Wait {
 		conditions.Delete(obj, meta.HealthyCondition)
 		return nil
@@ -990,43 +1018,16 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	}
 
 	// Check the health with a default timeout of 30sec shorter than the reconciliation interval.
-	healthCtx := ctx
-	if r.CancelHealthCheckOnNewRevision {
-		// Create a cancellable context for health checks that monitors for new revisions
-		var cancel context.CancelFunc
-		healthCtx, cancel = context.WithCancel(ctx)
-		defer cancel()
-
-		// Start monitoring for new revisions to allow early cancellation
-		go func() {
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-healthCtx.Done():
-					return
-				case <-ticker.C:
-					// Get the latest source artifact
-					latestSrc, err := r.getSource(ctx, obj)
-					if err == nil && latestSrc.GetArtifact() != nil {
-						if newRevision := latestSrc.GetArtifact().Revision; newRevision != revision {
-							const msg = "New revision detected during health check, cancelling"
-							r.event(obj, revision, originRevision, eventv1.EventSeverityInfo, msg, nil)
-							ctrl.LoggerFrom(ctx).Info(msg, "current", revision, "new", newRevision)
-							cancel()
-							return
-						}
-					}
-				}
-			}
-		}()
-	}
+	healthCtx := runtimeCtrl.GetInterruptContext(ctx)
 	if err := manager.WaitForSetWithContext(healthCtx, toCheck, ssa.WaitOptions{
-		Interval: 5 * time.Second,
-		Timeout:  obj.GetTimeout(),
-		FailFast: r.FailFast,
+		Interval:    5 * time.Second,
+		Timeout:     obj.GetTimeout(),
+		FailFast:    r.FailFast,
+		JobsWithTTL: jobsWithTTL,
 	}); err != nil {
+		if is, err := runtimeCtrl.IsObjectEnqueued(ctx); is {
+			return err
+		}
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.HealthCheckFailedReason, "%s", err)
 		conditions.MarkFalse(obj, meta.HealthyCondition, meta.HealthCheckFailedReason, "%s", err)
 		return fmt.Errorf("health check failed after %s: %w", time.Since(checkStart).String(), err)
@@ -1223,12 +1224,12 @@ func (r *KustomizationReconciler) event(obj *kustomizev1.Kustomization,
 		reason = r
 	}
 
-	eventtype := "Normal"
+	eventType := corev1.EventTypeNormal
 	if severity == eventv1.EventSeverityError {
-		eventtype = "Warning"
+		eventType = corev1.EventTypeWarning
 	}
 
-	r.EventRecorder.AnnotatedEventf(obj, metadata, eventtype, reason, msg)
+	r.EventRecorder.AnnotatedEventf(obj, metadata, eventType, reason, msg)
 }
 
 func (r *KustomizationReconciler) finalizeStatus(ctx context.Context,
@@ -1297,13 +1298,14 @@ func (r *KustomizationReconciler) patch(ctx context.Context,
 // Should be used for reconciliations that are not configured to use
 // ServiceAccount impersonation or kubeconfig.
 func (r *KustomizationReconciler) getClientAndPoller(
-	readerCtors []func(apimeta.RESTMapper) engine.StatusReader,
+	obj *kustomizev1.Kustomization,
+	readerCtor func(apimeta.RESTMapper) engine.StatusReader,
 ) (client.Client, *polling.StatusPoller) {
 
-	readers := make([]engine.StatusReader, 0, 1+len(readerCtors))
+	readers := make([]engine.StatusReader, 0, 1+len(obj.Spec.HealthCheckExprs))
 	readers = append(readers, statusreaders.NewCustomJobStatusReader(r.Mapper))
-	for _, ctor := range readerCtors {
-		readers = append(readers, ctor(r.Mapper))
+	if len(obj.Spec.HealthCheckExprs) > 0 {
+		readers = append(readers, readerCtor(r.Mapper))
 	}
 
 	poller := polling.NewStatusPoller(r.Client, r.Mapper, polling.Options{

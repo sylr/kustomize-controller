@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -188,6 +189,12 @@ func New(client client.Client, kustomization *kustomizev1.Kustomization, opts ..
 	return d, cleanup, nil
 }
 
+// IsDecryptionDisabled checks if the given object has the decrypt: disabled annotation set
+func IsDecryptionDisabled(annotations map[string]string) bool {
+	return annotations != nil &&
+		strings.EqualFold(annotations[fmt.Sprintf("%s/decrypt", kustomizev1.GroupVersion.Group)], kustomizev1.DisabledValue)
+}
+
 // IsEncryptedSecret checks if the given object is a Kubernetes Secret encrypted
 // with Mozilla SOPS.
 func IsEncryptedSecret(object *unstructured.Unstructured) bool {
@@ -336,19 +343,20 @@ func (d *Decryptor) SetAuthOptions(ctx context.Context) {
 		}
 
 		if d.awsCredentialsProvider == nil {
-			awsOpts := opts
+			awsOpts := slices.Clone(opts)
 			if d.tokenCache != nil {
 				involvedObject.Operation = kustomizev1.MetricDecryptWithAWS
 				awsOpts = append(awsOpts, auth.WithCache(*d.tokenCache, involvedObject))
 			}
 			d.awsCredentialsProvider = func(region string) awssdk.CredentialsProvider {
-				awsOpts := append(awsOpts, auth.WithSTSRegion(region))
-				return aws.NewCredentialsProvider(ctx, awsOpts...)
+				awsOptsWithRegion := slices.Clone(awsOpts)
+				awsOptsWithRegion = append(awsOptsWithRegion, auth.WithSTSRegion(region))
+				return aws.NewCredentialsProvider(ctx, awsOptsWithRegion...)
 			}
 		}
 
 		if d.azureTokenCredential == nil {
-			azureOpts := opts
+			azureOpts := slices.Clone(opts)
 			if d.tokenCache != nil {
 				involvedObject.Operation = kustomizev1.MetricDecryptWithAzure
 				azureOpts = append(azureOpts, auth.WithCache(*d.tokenCache, involvedObject))
@@ -357,7 +365,7 @@ func (d *Decryptor) SetAuthOptions(ctx context.Context) {
 		}
 
 		if d.gcpTokenSource == nil {
-			gcpOpts := opts
+			gcpOpts := slices.Clone(opts)
 			if d.tokenCache != nil {
 				involvedObject.Operation = kustomizev1.MetricDecryptWithGCP
 				gcpOpts = append(gcpOpts, auth.WithCache(*d.tokenCache, involvedObject))
@@ -437,7 +445,10 @@ func (d *Decryptor) SopsDecryptWithFormat(data []byte, inputFormat, outputFormat
 // while decrypting with DecryptionProviderSOPS, to allow individual data entries
 // injected by e.g. a Kustomize secret generator to be decrypted
 func (d *Decryptor) DecryptResource(res *resource.Resource) (*resource.Resource, error) {
-	if res == nil || d.kustomization.Spec.Decryption == nil || d.kustomization.Spec.Decryption.Provider == "" {
+	if res == nil ||
+		d.kustomization.Spec.Decryption == nil ||
+		d.kustomization.Spec.Decryption.Provider == "" ||
+		IsDecryptionDisabled(res.GetAnnotations()) {
 		return nil, nil
 	}
 
