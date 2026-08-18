@@ -63,6 +63,7 @@ import (
 	"github.com/fluxcd/pkg/runtime/patch"
 	"github.com/fluxcd/pkg/runtime/statusreaders"
 	"github.com/fluxcd/pkg/ssa"
+	"github.com/fluxcd/pkg/ssa/jsondiff"
 	"github.com/fluxcd/pkg/ssa/normalize"
 	ssautil "github.com/fluxcd/pkg/ssa/utils"
 	"github.com/fluxcd/pkg/tar"
@@ -106,6 +107,7 @@ type KustomizationReconciler struct {
 	NoCrossNamespaceRefs    bool
 	NoRemoteBases           bool
 	SOPSAgeSecret           string
+	SOPSVaultConfigMap      string
 	TokenCache              *cache.TokenCache
 
 	// Retry and requeue options
@@ -120,6 +122,7 @@ type KustomizationReconciler struct {
 	DirectSourceFetch          bool
 	FailFast                   bool
 	GroupChangeLog             bool
+	MigrateAPIVersion          bool
 	StrictSubstitutions        bool
 }
 
@@ -282,7 +285,12 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		r.event(obj, revision, originRevision, eventv1.EventSeverityInfo,
 			fmt.Sprintf("Health checks canceled due to new reconciliation triggered by %s/%s/%s",
 				qes.Kind, qes.Namespace, qes.Name), nil)
-		return ctrl.Result{}, nil
+
+		// Requeue immediately to ensure the object is reconciled against the new revision in the eventuality
+		// of stale runtime cache that would cause the source predicate filter to drop the reconcile request.
+		// In the case where the cache is fresh and the object is already in the queue, the new reconcile request
+		// will be dropped by the controller runtime dedupe logic, so we don't risk reconciling twice the same revision.
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Broadcast the reconciliation failure and requeue at the specified retry interval.
@@ -462,22 +470,11 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// Validate and apply resources in stages.
-	drifted, changeSetWithSkipped, err := r.apply(ctx, resourceManager, obj, revision, originRevision, objects)
+	drifted, changeSet, err := r.apply(ctx, resourceManager, obj, revision, originRevision, objects)
 	if err != nil {
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
 		return err
-	}
-
-	// Filter out skipped entries from the change set.
-	changeSet := ssa.NewChangeSet()
-	skippedSet := make(map[object.ObjMetadata]struct{})
-	for _, entry := range changeSetWithSkipped.Entries {
-		if entry.Action == ssa.SkippedAction {
-			skippedSet[entry.ObjMetadata] = struct{}{}
-		} else {
-			changeSet.Add(entry)
-		}
 	}
 
 	// Create an inventory from the reconciled resources.
@@ -493,7 +490,7 @@ func (r *KustomizationReconciler) reconcile(
 	obj.Status.Inventory = newInventory
 
 	// Detect stale resources which are subject to garbage collection.
-	staleObjects, err := inventory.Diff(oldInventory, newInventory, skippedSet)
+	staleObjects, err := inventory.Diff(oldInventory, newInventory)
 	if err != nil {
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.ReconciliationFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.ReconciliationFailedReason, "%s", err)
@@ -501,7 +498,11 @@ func (r *KustomizationReconciler) reconcile(
 	}
 
 	// Run garbage collection for stale resources that do not have pruning disabled.
-	if _, err := r.prune(ctx, resourceManager, obj, revision, originRevision, staleObjects); err != nil {
+	// On failure, re-track the objects whose DELETE wasn't confirmed so that the
+	// next reconcile retries — otherwise status.Inventory advances past them
+	// and they leak as untracked orphans (issue #1664).
+	if _, survivors, err := r.prune(ctx, resourceManager, obj, revision, originRevision, staleObjects); err != nil {
+		inventory.Merge(obj.Status.Inventory, survivors)
 		obj.Status.History.Upsert(checksum, time.Now(), time.Since(reconcileStart), meta.PruneFailedReason, historyMeta)
 		conditions.MarkFalse(obj, meta.ReadyCondition, meta.PruneFailedReason, "%s", err)
 		return err
@@ -517,7 +518,7 @@ func (r *KustomizationReconciler) reconcile(
 		originRevision,
 		isNewRevision,
 		drifted,
-		changeSet.ToObjMetadataSet(),
+		changeSet,
 		ssautil.ExtractJobsWithTTL(objects)); err != nil {
 
 		if errors.Is(err, &runtimeCtrl.QueueEventSource{}) {
@@ -763,6 +764,9 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 	if name, ns := r.SOPSAgeSecret, os.Getenv(runtimeCtrl.EnvRuntimeNamespace); name != "" && ns != "" {
 		decryptorOpts = append(decryptorOpts, decryptor.WithSOPSAgeSecret(name, ns))
 	}
+	if name, ns := r.SOPSVaultConfigMap, os.Getenv(runtimeCtrl.EnvRuntimeNamespace); name != "" && ns != "" {
+		decryptorOpts = append(decryptorOpts, decryptor.WithVaultConfigMap(name, ns))
+	}
 	dec, cleanup, err := decryptor.New(r.Client, obj, decryptorOpts...)
 	if err != nil {
 		return nil, err
@@ -810,8 +814,10 @@ func (r *KustomizationReconciler) build(ctx context.Context,
 
 		// run variable substitutions
 		if obj.Spec.PostBuild != nil {
+			always := obj.GetSubstituteStrategy() == kustomizev1.SubstituteStrategyAlways
 			outRes, err := generator.SubstituteVariables(ctx, r.Client, u, res,
-				generator.SubstituteWithStrict(r.StrictSubstitutions))
+				generator.SubstituteWithStrict(r.StrictSubstitutions),
+				generator.SubstituteWithAlways(always))
 			if err != nil {
 				return nil, fmt.Errorf("post build failed for '%s/%s': %w", res.GetGvk(), res.GetName(), err)
 			}
@@ -862,6 +868,28 @@ func (r *KustomizationReconciler) apply(ctx context.Context,
 		fmt.Sprintf("%s/force", kustomizev1.GroupVersion.Group): kustomizev1.EnabledValue,
 	}
 	applyOpts.CustomStageKinds = r.CustomStageKinds
+	applyOpts.MigrateAPIVersion = r.MigrateAPIVersion
+
+	if len(obj.Spec.Ignore) > 0 {
+		ignoreRules := make([]jsondiff.IgnoreRule, len(obj.Spec.Ignore))
+		for i, rule := range obj.Spec.Ignore {
+			ignoreRules[i] = jsondiff.IgnoreRule{
+				Paths: rule.Paths,
+			}
+			if rule.Target != nil {
+				ignoreRules[i].Selector = &jsondiff.Selector{
+					Group:              rule.Target.Group,
+					Version:            rule.Target.Version,
+					Kind:               rule.Target.Kind,
+					Name:               rule.Target.Name,
+					Namespace:          rule.Target.Namespace,
+					AnnotationSelector: rule.Target.AnnotationSelector,
+					LabelSelector:      rule.Target.LabelSelector,
+				}
+			}
+		}
+		applyOpts.DriftIgnoreRules = ignoreRules
+	}
 
 	fieldManagers := []ssa.FieldManager{
 		{
@@ -974,8 +1002,19 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	originRevision string,
 	isNewRevision bool,
 	drifted bool,
-	objects object.ObjMetadataSet,
+	changeSet *ssa.ChangeSet,
 	jobsWithTTL object.ObjMetadataSet) error {
+
+	// We should not check the health of skipped objects, as they are chosen
+	// to be ignored by the user and may not be in a healthy state.
+	changeSetWithoutSkipped := ssa.NewChangeSet()
+	for _, entry := range changeSet.Entries {
+		if entry.Action != ssa.SkippedAction {
+			changeSetWithoutSkipped.Add(entry)
+		}
+	}
+	objects := changeSetWithoutSkipped.ToObjMetadataSet()
+
 	if len(obj.Spec.HealthChecks) == 0 && !obj.Spec.Wait {
 		conditions.Delete(obj, meta.HealthyCondition)
 		return nil
@@ -1047,40 +1086,69 @@ func (r *KustomizationReconciler) checkHealth(ctx context.Context,
 	return nil
 }
 
+// prune issues delete requests for the given stale objects. In addition to the
+// changed/error return, it returns the slice of objects whose deletion was NOT
+// confirmed by the apiserver (e.g. rejected by an admission webhook). Callers
+// must merge those survivors back into status.Inventory; otherwise the next
+// reconcile's old-vs-new diff will not surface them again and they become
+// untracked orphans labeled with this Kustomization. See issue #1664.
 func (r *KustomizationReconciler) prune(ctx context.Context,
 	manager *ssa.ResourceManager,
 	obj *kustomizev1.Kustomization,
 	revision string,
 	originRevision string,
-	objects []*unstructured.Unstructured) (bool, error) {
+	objects []*unstructured.Unstructured) (bool, []*unstructured.Unstructured, error) {
 	if !obj.Spec.Prune {
-		return false, nil
+		return false, nil, nil
 	}
 
 	log := ctrl.LoggerFrom(ctx)
 
-	opts := ssa.DeleteOptions{
-		PropagationPolicy: metav1.DeletePropagationBackground,
-		Inclusions:        manager.GetOwnerLabels(obj.Name, obj.Namespace),
-		Exclusions: map[string]string{
-			fmt.Sprintf("%s/prune", kustomizev1.GroupVersion.Group):     kustomizev1.DisabledValue,
-			fmt.Sprintf("%s/reconcile", kustomizev1.GroupVersion.Group): kustomizev1.DisabledValue,
-		},
-	}
-
-	changeSet, err := manager.DeleteAll(ctx, objects, opts)
+	changeSet, err := deleteObjects(ctx, obj, manager, objects)
 	if err != nil {
-		return false, err
+		// Identify objects whose DELETE wasn't confirmed (apiserver rejected,
+		// transient error, etc.) so the caller can re-track them. SkippedAction
+		// entries are intentional opt-outs (kustomize.toolkit.fluxcd.io/prune:
+		// disabled) and are treated as settled, otherwise we'd cause an endless
+		// retry of a delete the operator explicitly disabled.
+		return false, pruneSurvivors(objects, changeSet), err
 	}
 
 	// emit event only if the prune operation resulted in changes
 	if changeSet != nil && len(changeSet.Entries) > 0 {
 		log.Info(fmt.Sprintf("garbage collection completed: %s", changeSet.String()))
 		r.event(obj, revision, originRevision, eventv1.EventSeverityInfo, changeSet.String(), nil)
-		return true, nil
+		return true, nil, nil
 	}
 
-	return false, nil
+	return false, nil, nil
+}
+
+// pruneSurvivors returns the subset of objects whose DELETE was not confirmed
+// by the apiserver — i.e. objects without a corresponding DeletedAction or
+// SkippedAction entry in the returned ChangeSet. These should be re-merged into
+// status.Inventory so subsequent reconciles retry their prune. See #1664.
+func pruneSurvivors(objects []*unstructured.Unstructured, changeSet *ssa.ChangeSet) []*unstructured.Unstructured {
+	if len(objects) == 0 {
+		return nil
+	}
+	settled := make(map[string]bool)
+	if changeSet != nil {
+		for _, entry := range changeSet.Entries {
+			switch entry.Action {
+			case ssa.DeletedAction, ssa.SkippedAction:
+				settled[entry.ObjMetadata.String()] = true
+			}
+		}
+	}
+	var survivors []*unstructured.Unstructured
+	for _, obj := range objects {
+		id := object.UnstructuredToObjMetadata(obj).String()
+		if !settled[id] {
+			survivors = append(survivors, obj)
+		}
+	}
+	return survivors
 }
 
 // finalizerShouldDeleteResources determines if resources should be deleted
@@ -1153,16 +1221,7 @@ func (r *KustomizationReconciler) finalize(ctx context.Context,
 				Group: kustomizev1.GroupVersion.Group,
 			})
 
-			opts := ssa.DeleteOptions{
-				PropagationPolicy: metav1.DeletePropagationBackground,
-				Inclusions:        resourceManager.GetOwnerLabels(obj.Name, obj.Namespace),
-				Exclusions: map[string]string{
-					fmt.Sprintf("%s/prune", kustomizev1.GroupVersion.Group):     kustomizev1.DisabledValue,
-					fmt.Sprintf("%s/reconcile", kustomizev1.GroupVersion.Group): kustomizev1.DisabledValue,
-				},
-			}
-
-			changeSet, err := resourceManager.DeleteAll(ctx, objects, opts)
+			changeSet, err := deleteObjects(ctx, obj, resourceManager, objects)
 			if err != nil {
 				r.event(obj, obj.Status.LastAppliedRevision, obj.Status.LastAppliedOriginRevision, eventv1.EventSeverityError, "pruning for deleted resource failed", nil)
 				// Return the error so we retry the failed garbage collection
@@ -1229,7 +1288,7 @@ func (r *KustomizationReconciler) event(obj *kustomizev1.Kustomization,
 		eventType = corev1.EventTypeWarning
 	}
 
-	r.EventRecorder.AnnotatedEventf(obj, metadata, eventType, reason, msg)
+	r.EventRecorder.AnnotatedEventf(obj, metadata, eventType, reason, "%s", msg)
 }
 
 func (r *KustomizationReconciler) finalizeStatus(ctx context.Context,
@@ -1335,6 +1394,26 @@ func (r *KustomizationReconciler) getProviderRESTConfigFetcher(obj *kustomizev1.
 		provider = runtimeClient.ProviderRESTConfigFetcher(authutils.GetRESTConfigFetcher(opts...))
 	}
 	return provider
+}
+
+// deleteObjects deletes the given objects using the provided ResourceManager
+// and returns a ChangeSet containing the metadata of the deleted objects.
+func deleteObjects(
+	ctx context.Context,
+	obj *kustomizev1.Kustomization,
+	manager *ssa.ResourceManager,
+	objects []*unstructured.Unstructured,
+) (*ssa.ChangeSet, error) {
+	opts := ssa.DeleteOptions{
+		PropagationPolicy: metav1.DeletePropagationBackground,
+		Inclusions:        manager.GetOwnerLabels(obj.Name, obj.Namespace),
+		Exclusions: map[string]string{
+			fmt.Sprintf("%s/prune", kustomizev1.GroupVersion.Group):     kustomizev1.DisabledValue,
+			fmt.Sprintf("%s/reconcile", kustomizev1.GroupVersion.Group): kustomizev1.DisabledValue,
+			fmt.Sprintf("%s/ssa", kustomizev1.GroupVersion.Group):       kustomizev1.IgnoreValue,
+		},
+	}
+	return manager.DeleteAll(ctx, objects, opts)
 }
 
 // getOriginRevision returns the origin revision of the source artifact,

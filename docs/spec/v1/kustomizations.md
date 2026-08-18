@@ -355,8 +355,12 @@ health checks on custom resources. This is done through Common Expression
 Language (CEL) expressions. This field accepts a list of objects with the
 following fields:
 
-- `apiVersion`: The API version of the custom resource. Required.
-- `kind`: The kind of the custom resource. Required.
+- `apiVersion`: The API version of the custom resource. Required. Only the
+  group portion is used for matching; the version is ignored, so the same
+  entry applies to every served version of the resource.
+- `kind`: The kind of the custom resource. Optional. When omitted, the entry
+  applies to all kinds under the given `apiVersion`'s group. An entry with a
+  specific `kind` takes precedence over a group-only entry for that same kind.
 - `current`: A required CEL expression that returns `true` if the resource is ready.
 - `inProgress`: An optional CEL expression that returns `true` if the resource
   is still being reconciled.
@@ -649,6 +653,41 @@ spec:
     digest: sha256:24a0c4b4a4c0eb97a1aabb8e29f18e917d05abfe1b7a7c07857230879ce7d3d3
 ```
 
+### Build metadata
+
+`.spec.buildMetadata` is an optional list used to specify which
+[Kustomize `buildMetadata`](https://kubectl.docs.kubernetes.io/references/kustomize/kustomization/buildmetadata/)
+options should be added to the built resources. The allowed values are:
+
+- `originAnnotations`: Adds `config.kubernetes.io/origin` annotations that
+  track which file and path each resource was loaded from.
+- `transformerAnnotations`: Adds `internal.config.kubernetes.io` annotations
+  that record which kustomize transformers modified each resource.
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: podinfo
+  namespace: flux-system
+spec:
+  # ...omitted for brevity
+  buildMetadata:
+  - originAnnotations
+```
+
+When `originAnnotations` is enabled, each resource gets an annotation like:
+
+```yaml
+metadata:
+  annotations:
+    config.kubernetes.io/origin: |
+      path: apps/deployment.yaml
+```
+
+This is useful for debugging, auditing, and tooling that needs to trace
+resources back to their source files.
+
 ### Components
 
 `.spec.components` is an optional list used to specify
@@ -783,11 +822,6 @@ will print out `${var}`.
 All the undefined variables in the format `${var}` will be substituted with an
 empty string unless a default value is provided e.g. `${var:=default}`.
 
-**Note:** It is recommended to set the `--feature-gates=StrictPostBuildSubstitutions=true`
-controller flag, so that the post-build substitutions will fail if a
-variable without a default value is declared in files but is
-missing from the input vars.
-
 You can disable the variable substitution for certain resources by either
 labelling or annotating them with:
 
@@ -795,11 +829,17 @@ labelling or annotating them with:
 kustomize.toolkit.fluxcd.io/substitute: disabled
 ```
 
-Substitution of variables only happens if at least a single variable or resource
-to substitute from is defined. This may cause issues if you rely on expressions
+By default, substitution of variables only happens if at least a single variable
+is available, either defined in-line with `substitute` or resolved from the
+ConfigMaps and Secrets referenced in `substituteFrom`. Note that defining a
+`substituteFrom` reference is not enough on its own: the referenced ConfigMaps
+and Secrets must be resolved and actually contain variables, otherwise the
+substitution is still skipped. This may cause issues if you rely on expressions
 which should evaluate to a default value, even if no other variables are
-configured. To work around this, one can set an arbitrary key/value pair to
-enable the substitution of variables. For example:
+configured, e.g. `${var:=default}`.
+
+To always perform the substitution regardless of whether any variables are
+defined, set `.spec.postBuild.substituteStrategy` to `Always`:
 
 ```yaml
 apiVersion: kustomize.toolkit.fluxcd.io/v1
@@ -809,9 +849,19 @@ metadata:
 spec:
   # ...omitted for brevity
   postBuild:
-    substitute:
-      var_substitution_enabled: "true"
+    substituteStrategy: Always
 ```
+
+The `.spec.postBuild.substituteStrategy` field accepts the following values:
+
+- `WithVariables` (default): the substitution is only performed if at least one
+  variable is available, either defined in-line with `substitute` or resolved
+  from the ConfigMaps and Secrets referenced in `substituteFrom`. Note that a
+  `substituteFrom` reference to an empty ConfigMap or Secret yields no variables,
+  so the substitution is still skipped.
+- `Always`: the substitution is always performed, even if no variables are
+  defined. This is useful when the substitution expressions have defaults, e.g.
+  `${var:=default}`.
 
 **Note:** When using numbers or booleans as values for variables, they must be
 enclosed in double quotes vars to be treated as strings, for more information see
@@ -853,6 +903,113 @@ kustomize.toolkit.fluxcd.io/force: enabled
 
 This way, only the targeted resources are force-replaced when immutable field
 changes are made. The annotation should be removed after the change is applied.
+
+### Ignore Rules
+
+`.spec.ignore` is an optional list used to selectively ignore changes
+to specific fields during drift detection and correction. This allows external
+controllers or tools to manage certain fields on Kubernetes resources without
+having those changes reverted by the kustomize-controller during reconciliation.
+
+Each item in the list must have the following fields:
+
+- `paths` (required): A list of [JSON Pointer (RFC 6901)](https://datatracker.ietf.org/doc/html/rfc6901)
+  paths to exclude from drift detection. These paths refer to specific fields
+  within the Kubernetes object manifest.
+- `target` (optional): A selector to scope the rule to specific Kubernetes
+  resources. If not set, the paths are ignored for all resources in the
+  Kustomization.
+
+**Warning:** Omitting the `target` selector causes the rule to match **all**
+objects managed by the Kustomization. Always scope rules to specific resources
+using `target` unless you intentionally want to ignore the specified paths
+across every resource.
+
+The `target` selector supports the following fields:
+
+| Field                | Description                          |
+|----------------------|--------------------------------------|
+| `group`              | API group (regex)                    |
+| `version`            | API version (regex)                  |
+| `kind`               | Resource kind (regex)                |
+| `name`               | Resource name (regex)                |
+| `namespace`          | Resource namespace (regex)           |
+| `labelSelector`      | Kubernetes label selector expression |
+| `annotationSelector` | Kubernetes annotation selector expression |
+
+**Note:** The `group`, `version`, `kind`, `name`, and `namespace` fields
+support regex patterns. The `labelSelector` and `annotationSelector` fields
+use the standard Kubernetes
+[label selector](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#label-selectors)
+syntax.
+
+**Note:** For JSON Pointer paths that contain `/` in the key name (e.g.
+annotation keys), the `/` must be escaped as `~1` per
+[RFC 6901](https://datatracker.ietf.org/doc/html/rfc6901#section-3).
+For example, the annotation `external-dns.alpha.kubernetes.io/hostname`
+would be referenced as `/metadata/annotations/external-dns.alpha.kubernetes.io~1hostname`.
+
+To ignore fields only on resources that match a target selector:
+
+```yaml
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: app
+  namespace: flux-system
+spec:
+  # ...omitted for brevity
+  ignore:
+    - paths:
+        - "/spec/replicas"
+      target:
+        kind: Deployment
+    - paths:
+        - "/metadata/annotations/external-dns.alpha.kubernetes.io~1hostname"
+      target:
+        kind: Service
+        name: my-service
+    - paths:
+        - "/spec/template/spec/containers/0/resources"
+      target:
+        kind: Deployment
+        name: my-app
+```
+
+In the above example:
+
+- The `/spec/replicas` field is ignored on all Deployments, allowing
+  an HPA or other autoscaler to manage the replica count without
+  interference from the kustomize-controller.
+- The `external-dns.alpha.kubernetes.io/hostname` annotation is ignored
+  on a specific Service named `my-service`, allowing external-dns to
+  manage this annotation.
+- The entire `/resources` subtree under container spec is ignored on
+  a specific Deployment named `my-app`, allowing a VPA or other resource
+  management tool to adjust container resources.
+
+**Note:** Changes to ignored fields alone do not trigger a reconciliation.
+The controller excludes ignored paths when comparing the desired state against
+the live object, so modifications made by external controllers to those fields
+will not cause unnecessary applies or resource version bumps.
+
+**Important:** Drift ignore rules work with the
+[server-side apply](https://kubernetes.io/docs/reference/using-api/server-side-apply/)
+field ownership model. When a reconciliation is triggered (e.g. by a source
+revision change or drift in non-ignored fields),
+the controller resolves each ignored path using one of two strategies based on
+field ownership:
+
+- **Strip** — If the ignored field is owned by another Apply-type field manager
+  (e.g. another controller using server-side apply), the field is removed from
+  the apply payload. This relinquishes the controller's ownership and allows the
+  other manager to retain full control of the field.
+- **Adopt** — If the controller is the sole Apply-type field manager for the
+  field, the in-cluster value is copied into the apply payload. This preserves
+  the current value without reverting changes made by Update-type operations
+  (e.g. `kubectl patch`, `kubectl edit`, or client-go Update calls) while
+  keeping the controller's field ownership intact.
 
 ### KubeConfig (Remote clusters)
 
@@ -1009,7 +1166,7 @@ configure decryption for Secrets that are a part of the Kustomization.
 The only supported encryption provider is [SOPS](https://getsops.io/).
 With SOPS you can encrypt your secrets with [age](https://github.com/FiloSottile/age)
 or [OpenPGP](https://www.openpgp.org) keys, or with keys from Key Management Services
-(KMS), like AWS KMS, Azure Key Vault, GCP KMS or Hashicorp Vault.
+(KMS), like AWS KMS, Azure Key Vault, GCP KMS or OpenBao/Vault.
 
 **Note:** You must leave `metadata`, `kind` or `apiVersion` in plain text.
 An easy way to do this is limiting the encrypted keys with the flag
@@ -1022,7 +1179,12 @@ The `.spec.decryption` field has the following subfields:
 - `.secretRef.name`: The name of the secret that contains the keys or cloud provider
   static credentials for KMS services to be used for decryption.
 - `.serviceAccountName`: The name of the service account used for
-  secret-less authentication with KMS services from cloud providers.
+  secret-less authentication with KMS services from cloud providers, and
+  with OpenBao/Vault via the
+  [Kubernetes auth method](#openbaovault-kubernetes-auth) (object-level workload
+  identity). This requires the `ObjectLevelWorkloadIdentity` feature gate to be
+  enabled. When unset, the controller falls back to its own ServiceAccount
+  ([controller-level workload identity](#controller-global-decryption)).
 
 To make a Kustomization react immediately to changes in the referenced Secret
 see [this](#reacting-immediately-to-configuration-dependencies) section.
@@ -1076,7 +1238,7 @@ metadata:
 data:
   # Exemplary age private key
   identity.agekey: <BASE64>
-  # Exemplary Hashicorp Vault token
+  # Exemplary OpenBao/Vault token
   sops.vault-token: <BASE64>
 ```
 
@@ -1254,9 +1416,9 @@ stringData:
     }
 ```
 
-#### Hashicorp Vault Secret entry
+#### OpenBao/Vault Secret entry
 
-To specify credentials for Hashicorp Vault in a Kubernetes Secret, append a
+To specify credentials for OpenBao/Vault in a Kubernetes Secret, append a
 `.data` entry with a fixed `sops.vault-token` key and the token as value.
 
 ```yaml
@@ -1267,9 +1429,94 @@ metadata:
   name: sops-keys
   namespace: default
 data:
-  # Exemplary Hashicorp Vault Secret token
+  # Exemplary OpenBao/Vault Secret token
   sops.vault-token: <BASE64>
 ```
+
+#### OpenBao/Vault Kubernetes auth
+
+Instead of a static `sops.vault-token`, the controller can authenticate to
+OpenBao/Vault by exchanging a Kubernetes ServiceAccount token for a short-lived
+Vault token via a JWT-backed auth method (e.g. the
+[Kubernetes auth method](https://openbao.org/docs/auth/kubernetes/) or the
+[JWT auth method](https://openbao.org/docs/auth/jwt/)). This is enabled with the
+`--sops-vault-configmap` flag, which names a ConfigMap in the controller's
+namespace that maps each Vault address to the login path to authenticate at. The
+ConfigMap also acts as an **allowlist**: only addresses listed in it can be
+authenticated to this way. This does not affect the static token paths — the
+`sops.vault-token` Secret entry and the `VAULT_TOKEN` environment variable
+continue to work for any address. When the flag is empty, this authentication is
+disabled and decryption falls back to those static token paths.
+
+The mapping is stored under the `config.yaml` key as a list of instances, each
+with an `address` and the `loginPath` to authenticate at. The login path is used
+verbatim, so it supports any JWT-backed auth method and namespace-prefixed paths
+(e.g. `ns1/ns2/auth/kubernetes/login`). The ConfigMap must be in the same
+namespace as the kustomize-controller Deployment.
+
+```yaml
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sops-vault-config
+  namespace: flux-system
+data:
+  config.yaml: |
+    instances:
+      - address: https://vault-a.example.com:8200
+        loginPath: auth/kubernetes/login
+      - address: https://vault-b.example.com:8200
+        loginPath: ns1/ns2/auth/kubernetes/login
+```
+
+Then, patch the kustomize-controller Deployment to add the flag:
+
+```yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kustomize-controller
+  namespace: flux-system
+spec:
+  template:
+    spec:
+      containers:
+      - name: manager
+        args:
+        - --sops-vault-configmap=sops-vault-config
+```
+
+When enabled, a Kustomization whose decryption Secret does **not** contain a
+`sops.vault-token` authenticates to the Vault address found in the SOPS metadata
+of each encrypted data key as follows:
+
+- The Kubernetes ServiceAccount token is issued for
+  [`.spec.decryption.serviceAccountName`](#decryption) when set (object-level
+  workload identity, which requires the `ObjectLevelWorkloadIdentity` feature
+  gate to be enabled), otherwise for the controller's own ServiceAccount
+  ([controller-level workload identity](#controller-global-decryption)).
+- The token audience is set to the Vault address.
+- The Vault role is derived from the ServiceAccount as `{namespace}_{name}`
+  (e.g. a ServiceAccount `sops` in namespace `apps` maps to the role `apps_sops`).
+
+On the Vault server, the operator must enable and configure the auth method
+behind the configured login path (for the Kubernetes auth method, with the
+cluster's API server address, CA certificate and a token reviewer JWT), and
+create a role `{namespace}_{name}` bound to the ServiceAccount and namespace,
+with its audience set to the Vault address and a policy granting `update` on the
+relevant `transit/decrypt/<key>` paths. See the
+[OpenBao Kubernetes auth docs](https://openbao.org/docs/auth/kubernetes/) for the
+auth method and role configuration. When several clusters share one Vault, enable
+a separate auth mount per cluster (each configured with that cluster's API
+server, CA and reviewer JWT) and set each cluster's login path in its own
+ConfigMap.
+
+The authentication methods are tried in order of precedence: a static
+`sops.vault-token` in the Secret referenced by
+[`.spec.decryption.secretRef`](#decryption) takes priority over Kubernetes auth,
+which in turn takes priority over the global `VAULT_TOKEN` environment variable.
 
 #### Controlling the decryption behavior of resources
 
@@ -1632,10 +1879,15 @@ Controller-level configuration:
 These guides provide detailed instructions for setting up authentication,
 permissions, and controller configuration for each cloud provider.
 
-#### Hashicorp Vault
+#### OpenBao/Vault
 
-To configure a global default for Hashicorp Vault, patch the controller's
-Deployment with a `VAULT_TOKEN` environment variable.
+There are two ways to configure controller-level authentication to OpenBao/Vault
+for SOPS decryption: a static token, or the Kubernetes auth method.
+
+##### Static token
+
+To configure a global default token, patch the controller's Deployment with a
+`VAULT_TOKEN` environment variable.
 
 ```yaml
 ---
@@ -1653,6 +1905,22 @@ spec:
         - name: VAULT_TOKEN
           value: <token>
 ```
+
+##### Kubernetes auth
+
+When SOPS decryption uses OpenBao/Vault with the
+[Kubernetes auth method](#openbaovault-kubernetes-auth), the controller-global
+identity is simply kustomize-controller's own ServiceAccount: a Kustomization
+that sets no [`.spec.decryption.serviceAccountName`](#decryption) authenticates
+to Vault as the controller's ServiceAccount (controller-level workload identity).
+
+Setting `.spec.decryption.serviceAccountName` makes the authentication
+object-level rather than global, and requires the `ObjectLevelWorkloadIdentity`
+feature gate to be enabled.
+
+See [OpenBao/Vault Kubernetes auth](#openbaovault-kubernetes-auth) for enabling
+the method (the `--sops-vault-configmap` flag and ConfigMap) and the Vault server
+configuration.
 
 #### SOPS Age Keys
 
@@ -1727,7 +1995,7 @@ the input type when encrypting them with SOPS:
 ```sh
 sops -e --input-type=json config.json > config.json.encrypted
 sops -e --input-type=yaml config.yaml > config.yaml.encrypted
-sops -e --input-type=env config.env > config.env.encrypted
+sops -e --input-type=dotenv --output-type=dotenv config.env > config.env.encrypted
 ```
 
 For kustomize-controller to be able to decrypt a JSON config, you need to set

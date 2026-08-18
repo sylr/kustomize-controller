@@ -32,11 +32,13 @@ GO_TEST_ARGS ?=
 
 # Allows for defining additional Docker buildx arguments, e.g. '--push'.
 BUILD_ARGS ?= --load
-# Architectures to build images for.
-BUILD_PLATFORMS ?= linux/amd64
+# Host architecture, used so local builds and envtest target the host.
+LOCALARCH ?= $(shell go env GOARCH)
+# Architectures to build images for; defaults to the host architecture.
+BUILD_PLATFORMS ?= linux/$(LOCALARCH)
 
-# Architecture to use envtest with
-ENVTEST_ARCH ?= amd64
+# Architecture to use envtest with; defaults to the host architecture.
+ENVTEST_ARCH ?= $(LOCALARCH)
 
 # Paths to download the CRD dependencies at.
 GITREPO_CRD ?= config/crd/bases/gitrepositories.yaml
@@ -49,7 +51,7 @@ EA_CRD ?= config/crd/bases/externalartifacts.yaml
 SOURCE_CRD_VER=$(BUILD_DIR)/.src-crd-$(SOURCE_VER)
 
 # API (doc) generation utilities
-CONTROLLER_GEN_VERSION ?= v0.19.0
+CONTROLLER_GEN_VERSION ?= v0.21.0
 GEN_API_REF_DOCS_VERSION ?= e327d0730470cbd61b06300f81c5fcf91c23c113
 
 all: manager

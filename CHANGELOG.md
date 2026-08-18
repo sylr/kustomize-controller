@@ -2,6 +2,189 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.9.4
+
+**Release date:** 2026-07-23
+
+This patch release fixes a `spec.images` entry that sets only some of the
+image fields discarding the remaining fields already declared for the same
+image in the `kustomization.yaml` at `spec.path`, e.g. overriding only
+`newName` produced an untagged image reference.
+
+Fixes:
+- Update fluxcd/pkg dependencies
+  [#1714](https://github.com/fluxcd/kustomize-controller/pull/1714)
+
+## 1.9.3
+
+**Release date:** 2026-07-13
+
+This patch release fixes a regression introduced in v1.9.2 where a Kustomization
+with `openapi.path` pointing to a URL failed to reconcile with
+`failed to read OpenAPI schema`.
+
+Fixes:
+- Update fluxcd/pkg dependencies
+  [#1703](https://github.com/fluxcd/kustomize-controller/pull/1703)
+
+## 1.9.2
+
+**Release date:** 2026-07-07
+
+This patch release fixes three bugs. Flux variable substitution is now disabled
+on the Kustomization CRD by annotating it with
+`kustomize.toolkit.fluxcd.io/substitute: disabled`, preventing post-build
+substitution from corrupting the CRD schema when it contains `${...}` sequences.
+The SOPS dependency was updated to fix decryption of `.ini` files. Finally, the
+fluxcd/pkg dependencies were updated to fix a dry-run error where applying a
+resource with a strategic merge patch could fail with `<resource> is invalid`.
+
+Fixes:
+- Fix CRD going through variable substitution
+  [#1694](https://github.com/fluxcd/kustomize-controller/pull/1694)
+- Update SOPS dependency to fix `.ini` file decryption
+  [#1699](https://github.com/fluxcd/kustomize-controller/pull/1699)
+- Update fluxcd/pkg dependencies
+  [#1697](https://github.com/fluxcd/kustomize-controller/pull/1697)
+
+## 1.9.1
+
+**Release date:** 2026-06-30
+
+This patch release updates Kubernetes to 1.36.2 and the fluxcd/pkg dependencies,
+adds kubectl categories to the Kustomization CRD and documents the controller's
+command-line options.
+
+Improvements:
+- Add categories to the Kustomization CRD
+  [#1682](https://github.com/fluxcd/kustomize-controller/pull/1682)
+- Document controller options
+  [#1685](https://github.com/fluxcd/kustomize-controller/pull/1685)
+- Update fluxcd/pkg dependencies
+  [#1683](https://github.com/fluxcd/kustomize-controller/pull/1683)
+
+## 1.9.0
+
+**Release date:** 2026-06-17
+
+This minor release comes with new features for post-build variable substitution,
+drift detection, SOPS decryption and Kustomize build metadata, along with various
+bug fixes and dependency updates.
+
+### Kustomization
+
+Post-build substitutions are now stricter by default: the controller fails the
+reconciliation when a variable without a default value is referenced in the
+manifests but is missing from the input vars. This behavior is controlled by the
+`StrictPostBuildSubstitutions` feature gate, which is now enabled by default and
+can be opted out of. In addition, a new `.spec.postBuild.substituteStrategy: Always`
+option was introduced to always perform substitutions even when no variables are
+defined, which is useful when the substitution expressions all carry defaults
+(e.g. `${var:=default}`).
+
+Drift detection can now be fine-tuned with ignore rules. The new `.spec.ignore`
+field accepts a list of rules selecting JSON pointer paths (optionally scoped to
+specific targets) to exclude from both drift detection and the apply process.
+
+A new `.spec.buildMetadata` field allows enabling Kustomize build metadata
+annotations per Kustomization, supporting the `originAnnotations` and
+`transformerAnnotations` options.
+
+The controller now keeps resources that failed to be pruned in the
+`.status.inventory`, ensuring they remain tracked and can be retried on the next
+reconciliation instead of becoming untracked orphans.
+
+#### SOPS decryption
+
+SOPS decryption now supports generic Kubernetes workload identity for the
+OpenBao/Vault transit engine, allowing the controller to authenticate to OpenBao
+by exchanging a Kubernetes ServiceAccount token for a short-lived OpenBao token
+through a JWT-backed auth method, instead of using a static token. This is purely
+additive and non-breaking: the existing `sops.vault-token` Secret and `VAULT_TOKEN`
+environment variable paths are unchanged and take precedence.
+
+Age and SOPS have also been updated to support Age hybrid post-quantum encryption.
+
+### General updates
+
+In addition, the Kubernetes dependencies have been updated to v1.36, the controller
+is now built with Go 1.26 and the source-controller API has been upgraded to v1.9.0.
+The shared `DependencyReference` type was migrated to the `apis/meta` package,
+preserving backward compatibility through a type alias.
+
+Fixes:
+- Keep failed-to-prune resources in `.status.inventory`
+  [#1665](https://github.com/fluxcd/kustomize-controller/pull/1665)
+
+Improvements:
+- Enable `StrictPostBuildSubstitutions` by default
+  [#1671](https://github.com/fluxcd/kustomize-controller/pull/1671)
+- Introduce `substituteStrategy: Always`
+  [#1672](https://github.com/fluxcd/kustomize-controller/pull/1672)
+- Add support for drift detection ignore rules
+  [#1627](https://github.com/fluxcd/kustomize-controller/pull/1627)
+- Add `.spec.buildMetadata` optional field to Kustomization API
+  [#1632](https://github.com/fluxcd/kustomize-controller/pull/1632)
+- Introduce generic Kubernetes workload identity for SOPS OpenBao/Vault
+  [#1659](https://github.com/fluxcd/kustomize-controller/pull/1659)
+- Update Age and SOPS for Age post-quantum cypher
+  [#1601](https://github.com/fluxcd/kustomize-controller/pull/1601)
+- Migrate `DependencyReference` to shared `apis/meta` type
+  [#1656](https://github.com/fluxcd/kustomize-controller/pull/1656)
+- Update to Kubernetes 1.36 and Go 1.26
+  [#1660](https://github.com/fluxcd/kustomize-controller/pull/1660)
+- Upgrade source-controller API to v1.9.0
+  [#1674](https://github.com/fluxcd/kustomize-controller/pull/1674)
+- Various dependency updates
+  [#1661](https://github.com/fluxcd/kustomize-controller/pull/1661)
+  [#1662](https://github.com/fluxcd/kustomize-controller/pull/1662)
+  [#1666](https://github.com/fluxcd/kustomize-controller/pull/1666)
+  [#1667](https://github.com/fluxcd/kustomize-controller/pull/1667)
+  [#1668](https://github.com/fluxcd/kustomize-controller/pull/1668)
+  [#1669](https://github.com/fluxcd/kustomize-controller/pull/1669)
+
+## 1.8.5
+
+**Release date:** 2026-05-12
+
+This patch release fixes a regression in the management of objects annotated
+with `kustomize.toolkit.fluxcd.io/ssa: IfNotPresent` where non-namespaced resources were
+being deleted and recreated on each reconciliation.
+
+Fixes:
+- Fix management of skipped objects
+  [#1651](https://github.com/fluxcd/kustomize-controller/pull/1651)
+
+Improvements:
+- Update fluxcd/pkg dependencies
+  [#1648](https://github.com/fluxcd/kustomize-controller/pull/1648)
+
+## 1.8.4
+
+**Release date:** 2026-04-21
+
+This patch release introduces the `MigrateAPIVersion` feature gate for
+migrating the API version of resources in managed field entries, which
+fixes errors like `dry-run failed: .spec.accessPolicy: field not declared
+in schema`.
+
+Improvements:
+- Introduce support for migrating API version
+  [#1639](https://github.com/fluxcd/kustomize-controller/pull/1639)
+- Update fluxcd/pkg dependencies
+  [#1637](https://github.com/fluxcd/kustomize-controller/pull/1637)
+
+## 1.8.3
+
+**Release date:** 2026-04-07
+
+This patch release fixes a race condition where a cancelled reconciliation
+could leave stale data in the cache, causing Kustomizations to get stuck.
+
+Fixes:
+- Requeue on cancellation to avoid stale cache race condition
+  [#1625](https://github.com/fluxcd/kustomize-controller/pull/1625)
+
 ## 1.8.2
 
 **Release date:** 2026-03-12

@@ -51,6 +51,31 @@ func AddChangeSet(inv *kustomizev1.ResourceInventory, set *ssa.ChangeSet) error 
 	return nil
 }
 
+// Merge appends the given objects to the inventory unless they already exist.
+// Used to re-track resources whose prune was rejected by the apiserver
+// (e.g. by an admission webhook) so that subsequent reconciles retry the
+// deletion instead of leaving them as untracked orphans.
+func Merge(inv *kustomizev1.ResourceInventory, objects []*unstructured.Unstructured) {
+	if inv == nil || len(objects) == 0 {
+		return
+	}
+	seen := make(map[string]bool, len(inv.Entries))
+	for _, e := range inv.Entries {
+		seen[e.ID] = true
+	}
+	for _, obj := range objects {
+		id := object.UnstructuredToObjMetadata(obj).String()
+		if seen[id] {
+			continue
+		}
+		inv.Entries = append(inv.Entries, kustomizev1.ResourceRef{
+			ID:      id,
+			Version: obj.GroupVersionKind().Version,
+		})
+		seen[id] = true
+	}
+}
+
 // List returns the inventory entries as unstructured.Unstructured objects.
 func List(inv *kustomizev1.ResourceInventory) ([]*unstructured.Unstructured, error) {
 	objects := make([]*unstructured.Unstructured, 0)
@@ -94,11 +119,8 @@ func ListMetadata(inv *kustomizev1.ResourceInventory) (object.ObjMetadataSet, er
 	return metas, nil
 }
 
-// Diff returns the slice of objects that do not exist in the target inventory,
-// ignoring those in the skippedSet.
-func Diff(inv *kustomizev1.ResourceInventory, target *kustomizev1.ResourceInventory,
-	skippedSet map[object.ObjMetadata]struct{}) ([]*unstructured.Unstructured, error) {
-
+// Diff returns the slice of objects that do not exist in the target inventory.
+func Diff(inv *kustomizev1.ResourceInventory, target *kustomizev1.ResourceInventory) ([]*unstructured.Unstructured, error) {
 	versionOf := func(i *kustomizev1.ResourceInventory, objMetadata object.ObjMetadata) string {
 		for _, entry := range i.Entries {
 			if entry.ID == objMetadata.String() {
@@ -109,15 +131,9 @@ func Diff(inv *kustomizev1.ResourceInventory, target *kustomizev1.ResourceInvent
 	}
 
 	objects := make([]*unstructured.Unstructured, 0)
-	aListWithSkipped, err := ListMetadata(inv)
+	aList, err := ListMetadata(inv)
 	if err != nil {
 		return nil, err
-	}
-	var aList object.ObjMetadataSet
-	for _, m := range aListWithSkipped {
-		if _, found := skippedSet[m]; !found {
-			aList = append(aList, m)
-		}
 	}
 
 	bList, err := ListMetadata(target)

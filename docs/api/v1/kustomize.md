@@ -89,8 +89,8 @@ overridden if its key matches a common one.</p>
 <td>
 <code>dependsOn</code><br>
 <em>
-<a href="#kustomize.toolkit.fluxcd.io/v1.DependencyReference">
-[]DependencyReference
+<a href="https://godoc.org/github.com/fluxcd/pkg/apis/meta#DependencyReference">
+[]github.com/fluxcd/pkg/apis/meta.DependencyReference
 </a>
 </em>
 </td>
@@ -385,6 +385,23 @@ resources. When enabled, the HealthChecks are ignored. Defaults to false.</p>
 </tr>
 <tr>
 <td>
+<code>buildMetadata</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.BuildMetadataOption">
+[]BuildMetadataOption
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BuildMetadata specifies which kustomize build metadata should be added
+to the built resources. The allowed values are &lsquo;originAnnotations&rsquo; to
+annotate resources with their source origin, and &lsquo;transformerAnnotations&rsquo;
+to annotate resources with the transformers that produced them.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>components</code><br>
 <em>
 []string
@@ -425,6 +442,23 @@ health of custom resources using Common Expression Language (CEL).
 The expressions are evaluated only when Wait or HealthChecks are specified.</p>
 </td>
 </tr>
+<tr>
+<td>
+<code>ignore</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.IgnoreRule">
+[]IgnoreRule
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Ignore is a list of rules for specifying which changes to ignore
+during drift detection. These rules are applied to the resources managed
+by the Kustomization and are used to exclude specific JSON pointer paths
+from the drift detection and apply process.</p>
+</td>
+</tr>
 </table>
 </td>
 </tr>
@@ -444,6 +478,13 @@ KustomizationStatus
 </table>
 </div>
 </div>
+<h3 id="kustomize.toolkit.fluxcd.io/v1.BuildMetadataOption">BuildMetadataOption
+(<code>string</code> alias)</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.KustomizationSpec">KustomizationSpec</a>)
+</p>
+<p>BuildMetadataOption defines the supported buildMetadata options.</p>
 <h3 id="kustomize.toolkit.fluxcd.io/v1.CommonMetadata">CommonMetadata
 </h3>
 <p>
@@ -623,13 +664,14 @@ field.</p>
 </table>
 </div>
 </div>
-<h3 id="kustomize.toolkit.fluxcd.io/v1.DependencyReference">DependencyReference
+<h3 id="kustomize.toolkit.fluxcd.io/v1.IgnoreRule">IgnoreRule
 </h3>
 <p>
 (<em>Appears on:</em>
 <a href="#kustomize.toolkit.fluxcd.io/v1.KustomizationSpec">KustomizationSpec</a>)
 </p>
-<p>DependencyReference defines a Kustomization dependency on another Kustomization resource.</p>
+<p>IgnoreRule defines a rule to selectively disregard specific changes during
+the drift detection process.</p>
 <div class="md-typeset__scrollwrap">
 <div class="md-typeset__table">
 <table>
@@ -642,42 +684,31 @@ field.</p>
 <tbody>
 <tr>
 <td>
-<code>name</code><br>
+<code>paths</code><br>
 <em>
-string
+[]string
 </em>
 </td>
 <td>
-<p>Name of the referent.</p>
+<p>Paths is a list of JSON Pointer (RFC 6901) paths to be excluded from
+consideration in a Kubernetes object.</p>
 </td>
 </tr>
 <tr>
 <td>
-<code>namespace</code><br>
+<code>target</code><br>
 <em>
-string
+<a href="https://godoc.org/github.com/fluxcd/pkg/apis/kustomize#Selector">
+github.com/fluxcd/pkg/apis/kustomize.Selector
+</a>
 </em>
 </td>
 <td>
 <em>(Optional)</em>
-<p>Namespace of the referent, defaults to the namespace of the Kustomization
-resource object that contains the reference.</p>
-</td>
-</tr>
-<tr>
-<td>
-<code>readyExpr</code><br>
-<em>
-string
-</em>
-</td>
-<td>
-<em>(Optional)</em>
-<p>ReadyExpr is a CEL expression that can be used to assess the readiness
-of a dependency. When specified, the built-in readiness check
-is replaced by the logic defined in the CEL expression.
-To make the CEL expression additive to the built-in readiness check,
-the feature gate <code>AdditiveCELDependencyCheck</code> must be set to <code>true</code>.</p>
+<p>Target is a selector for specifying Kubernetes objects to which this
+rule applies.
+If Target is not set, the Paths will be ignored for all Kubernetes
+objects within the manifest of the Kustomization.</p>
 </td>
 </tr>
 </tbody>
@@ -722,8 +753,8 @@ overridden if its key matches a common one.</p>
 <td>
 <code>dependsOn</code><br>
 <em>
-<a href="#kustomize.toolkit.fluxcd.io/v1.DependencyReference">
-[]DependencyReference
+<a href="https://godoc.org/github.com/fluxcd/pkg/apis/meta#DependencyReference">
+[]github.com/fluxcd/pkg/apis/meta.DependencyReference
 </a>
 </em>
 </td>
@@ -1018,6 +1049,23 @@ resources. When enabled, the HealthChecks are ignored. Defaults to false.</p>
 </tr>
 <tr>
 <td>
+<code>buildMetadata</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.BuildMetadataOption">
+[]BuildMetadataOption
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>BuildMetadata specifies which kustomize build metadata should be added
+to the built resources. The allowed values are &lsquo;originAnnotations&rsquo; to
+annotate resources with their source origin, and &lsquo;transformerAnnotations&rsquo;
+to annotate resources with the transformers that produced them.</p>
+</td>
+</tr>
+<tr>
+<td>
 <code>components</code><br>
 <em>
 []string
@@ -1056,6 +1104,23 @@ before running kustomize build.</p>
 <p>HealthCheckExprs is a list of healthcheck expressions for evaluating the
 health of custom resources using Common Expression Language (CEL).
 The expressions are evaluated only when Wait or HealthChecks are specified.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>ignore</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.IgnoreRule">
+[]IgnoreRule
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>Ignore is a list of rules for specifying which changes to ignore
+during drift detection. These rules are applied to the resources managed
+by the Kustomization and are used to exclude specific JSON pointer paths
+from the drift detection and apply process.</p>
 </td>
 </tr>
 </tbody>
@@ -1212,6 +1277,27 @@ generated by building the kustomize overlay.</p>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>
+<code>substituteStrategy</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.SubstituteStrategy">
+SubstituteStrategy
+</a>
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>SubstituteStrategy defines the strategy for substituting variables in the YAML manifests.
+Valid values are:</p>
+<ul>
+<li>WithVariables (the default): require at least one variable to be defined,
+either through the inline map or through the resolved references to ConfigMaps
+and Secrets.</li>
+<li>Always: perform the substitution even if no variables are defined.</li>
+</ul>
+</td>
+</tr>
 <tr>
 <td>
 <code>substitute</code><br>
@@ -1382,6 +1468,99 @@ bool
 <p>Optional indicates whether the referenced resource must exist, or whether to
 tolerate its absence. If true and the referenced resource is absent, proceed
 as if the resource was present but empty, without any variables defined.</p>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<h3 id="kustomize.toolkit.fluxcd.io/v1.SubstituteStrategy">SubstituteStrategy
+(<code>string</code> alias)</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.PostBuild">PostBuild</a>)
+</p>
+<p>SubstituteStrategy defines the strategy for substituting variables in the YAML manifests.</p>
+<h3 id="kustomize.toolkit.fluxcd.io/v1.VaultConfig">VaultConfig
+</h3>
+<p>VaultConfig is the controller-level configuration that enables and scopes
+authentication to OpenBao/Vault instances for SOPS decryption. The
+controller presents a Kubernetes ServiceAccount token to a JWT-backed auth
+method (e.g. the Kubernetes or JWT auth method). The operator provides this
+config through a ConfigMap, listing the instances the controller may
+authenticate to along with each instance&rsquo;s login path. It only governs this
+ServiceAccount-token authentication: the existing static token decryption
+paths (the sops.vault-token Secret entry and the VAULT_TOKEN environment
+variable) are unaffected and continue to work for any address.</p>
+<div class="md-typeset__scrollwrap">
+<div class="md-typeset__table">
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>instances</code><br>
+<em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.VaultInstance">
+[]VaultInstance
+</a>
+</em>
+</td>
+<td>
+<p>Instances is the list of known OpenBao/Vault instances.</p>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<h3 id="kustomize.toolkit.fluxcd.io/v1.VaultInstance">VaultInstance
+</h3>
+<p>
+(<em>Appears on:</em>
+<a href="#kustomize.toolkit.fluxcd.io/v1.VaultConfig">VaultConfig</a>)
+</p>
+<p>VaultInstance describes a single OpenBao/Vault instance and how the
+controller should authenticate to it.</p>
+<div class="md-typeset__scrollwrap">
+<div class="md-typeset__table">
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>
+<code>address</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>Address is the address of the OpenBao/Vault instance, matching
+the address stored in the SOPS metadata of the encrypted data key.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>loginPath</code><br>
+<em>
+string
+</em>
+</td>
+<td>
+<p>LoginPath is the API path of the login endpoint to authenticate to this
+instance with, e.g. &ldquo;auth/kubernetes/login&rdquo;. It is used verbatim, so it
+supports any JWT-backed auth method (e.g. the Kubernetes or JWT auth
+method) and namespace-prefixed paths (e.g. &ldquo;ns1/ns2/auth/kubernetes/login&rdquo;).</p>
 </td>
 </tr>
 </tbody>
