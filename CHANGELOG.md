@@ -2,6 +2,51 @@
 
 All notable changes to this project are documented in this file.
 
+## 1.9.6
+
+**Release date:** 2026-10-01
+
+This patch release extends the SOPS decryption error redaction to
+`spec.postBuild.substituteFrom` values: when a substituted value is echoed back in
+a Kubernetes API validation error, it is now masked out of the Kustomization status
+conditions and events instead of leaking into them. It also adds the opt-in
+`DisableCommitStatusEvent` feature gate, which lets users disable the reconciliation
+success event that notification-controller turns into a Git commit status update.
+
+Fixes:
+- Extend SOPS redaction to postBuild substitutions
+  [#1741](https://github.com/fluxcd/kustomize-controller/pull/1741)
+- Update fluxcd/pkg dependencies
+  [#1761](https://github.com/fluxcd/kustomize-controller/pull/1761)
+
+Improvements:
+- Add feature gate to disable commit status event
+  [#1755](https://github.com/fluxcd/kustomize-controller/pull/1755)
+- docs: Add reference to flux-schema
+  [#1738](https://github.com/fluxcd/kustomize-controller/pull/1738)
+
+## 1.9.5
+
+**Release date:** 2026-08-31
+
+This patch release stops the controller from leaving behind the temporary
+directories of a previous process that exited without running its cleanup, and
+fixes a crash in post-build substitution: a substring expression with a negative
+length, e.g. `${VAR:2:-1}`, panicked instead of counting back from the end of
+the string like Bash does. In addition, the kubeconfigs read from
+`.spec.kubeConfig` Secrets are now required to be self-contained: credentials
+and certificates must be embedded inline (`token`, `client-certificate-data`,
+`client-key-data`, `certificate-authority-data`), and entries referencing files
+on the local filesystem are rejected. The fluxcd/pkg updates also bring
+Kubernetes to 1.36.4.
+
+Fixes:
+- fix: purge tmp dirs at startup
+  [#1730](https://github.com/fluxcd/kustomize-controller/pull/1730)
+- Update fluxcd/pkg dependencies
+  [#1727](https://github.com/fluxcd/kustomize-controller/pull/1727)
+  [#1728](https://github.com/fluxcd/kustomize-controller/pull/1728)
+
 ## 1.9.4
 
 **Release date:** 2026-07-23
